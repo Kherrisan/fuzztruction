@@ -1,3 +1,4 @@
+use fuzztruction_shared::iosync_channel::IOSyncChannel;
 use fuzztruction_shared::messages;
 use fuzztruction_shared::{
     communication_channel::{CommunicationChannel, CommunicationChannelError},
@@ -45,6 +46,7 @@ lazy_static! {
     /// Mappings of the processes's virtual address space.
     pub static ref PROC_MAPPINGS: Mutex<Option<Vec<proc_maps::MapRange>>> = Mutex::new(None);
     pub static ref COMMUNICATION_CHANNEL: Mutex<Option<CommunicationChannel>> = Mutex::new(None);
+    pub static ref IO_SYNC_CHANNEL: Mutex<Option<IOSyncChannel>> = Mutex::new(None);
 }
 
 /// Send the given message to the coordinator.
@@ -105,9 +107,16 @@ pub fn update_proc_mappings() {
     drop(proc_mappings_guard);
 }
 
+const AGENT_NAME: &str = "SOURCE";
+
 /// Spin-up the forkserver by setting up communication to the coordinator.
 pub fn start_forkserver() {
-    let new_cc = CommunicationChannel::from_env();
+    let iosync_new = IOSyncChannel::from_env(AGENT_NAME);
+    if let Ok(mut iosync) = IO_SYNC_CHANNEL.try_lock() {
+        *iosync = Some(iosync_new);
+    }
+
+    let new_cc = CommunicationChannel::from_env(AGENT_NAME);
     match new_cc {
         // Assume that we are not executed by the coordinator, just execute the
         // binary normally.
@@ -414,4 +423,19 @@ fn process_messages() {
             _ => panic!("Unhandled message: {:#?}", new_msg),
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn __ft_io_sync() {
+    let mut iosync = IO_SYNC_CHANNEL
+        .try_lock()
+        .expect("Failed to unlock IO_SYNC_CHANNEL");
+    iosync
+        .as_ref()
+        .expect("IO_SYNC_CHANNEL not initialized")
+        .io_yield();
+    iosync
+        .as_mut()
+        .expect("IO_SYNC_CHANNEL not initialized")
+        .io_await();
 }

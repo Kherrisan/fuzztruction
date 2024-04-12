@@ -1,4 +1,4 @@
-use std::{cmp::min, mem, ptr};
+use std::{cmp::min, mem, ptr, slice::from_raw_parts};
 
 use log::warn;
 
@@ -32,11 +32,9 @@ pub struct MutationCacheContent {
 
 impl MutationCacheContent {
     fn data(&self) -> &MutationCacheEntry {
-        let addr = &self.data as *const MutationCacheEntry as u64;
-        unsafe {
-            let addr = addr as *const MutationCacheEntry;
-            &*addr
-        }
+        let addr = &self.data as *const MutationCacheEntry;
+        let data_slice = unsafe { from_raw_parts(addr, 1) };
+        &data_slice[0]
     }
 
     fn data_ptr<T>(&self) -> *const T {

@@ -48,7 +48,7 @@ impl FromStr for FromStrDuration {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SourceConfig {
     pub env: Vec<(String, String)>,
     /// Path to the Source binary.
@@ -170,7 +170,7 @@ impl Default for CombinePhaseConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct AflPlusPlusConfig {
     pub input_dir: PathBuf,
 }
@@ -180,7 +180,7 @@ pub struct QSYMConfig {
     input_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SinkConfig {
     pub env: Vec<(String, String)>,
     /// Path to the Sink binary.
@@ -198,7 +198,7 @@ pub struct SinkConfig {
     pub allow_unstable_sink: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct VanillaConfig {
     /// Environment used during binary
     pub env: Vec<(String, String)>,
@@ -207,7 +207,7 @@ pub struct VanillaConfig {
     pub arguments: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SymccConfig {
     /// Environment used during binary
     pub env: Vec<(String, String)>,
@@ -219,7 +219,7 @@ pub struct SymccConfig {
     pub afl_bin_env: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct GeneralConfig {
     pub input_dir: PathBuf,
     pub work_dir: PathBuf,
@@ -228,6 +228,10 @@ pub struct GeneralConfig {
     pub purge_workdir: bool,
     pub jail_uid: Option<u32>,
     pub jail_gid: Option<u32>,
+    pub mitm_port: u16,
+    pub target_port: u16,
+    pub mitm_buf_size: Option<usize>,
+    pub max_interactions: Option<u16>
 }
 
 impl GeneralConfig {
@@ -285,7 +289,7 @@ impl GeneralConfig {
 
 /// A config that describes a setup of one specific source and sink application
 /// pair.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct Config {
     /// Attributes shared between the source and the sink or that are not related
     /// to ether of them.
@@ -738,6 +742,8 @@ impl ConfigBuilder {
         let timeout = timeout.unwrap_or_else(|| Duration::from_millis(40));
         let jail_uid = self.get_attribute(yaml, "jail-uid")?;
         let jail_gid = self.get_attribute(yaml, "jail-gid")?;
+        let socket_host = self.get_attribute(yaml, "socket-host")?;
+        let socket_port = self.get_attribute(yaml, "socket-port")?;
 
         match (jail_uid, jail_gid) {
             (Some(..), Some(..)) => (),
@@ -770,6 +776,10 @@ impl ConfigBuilder {
             purge_workdir: false,
             jail_uid,
             jail_gid,
+            mitm_port: socket_host,
+            target_port: socket_port,
+            mitm_buf_size: None,
+            max_interactions: None
         })
     }
 

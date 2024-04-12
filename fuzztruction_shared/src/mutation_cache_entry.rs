@@ -263,6 +263,7 @@ impl MutationCacheEntry {
         self as *mut MutationCacheEntry
     }
 
+    #[allow(invalid_reference_casting)]
     pub unsafe fn alias_mut(&self) -> &mut MutationCacheEntry {
         let ptr = self as *const MutationCacheEntry as *mut MutationCacheEntry;
         &mut *ptr

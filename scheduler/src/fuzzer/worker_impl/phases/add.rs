@@ -82,7 +82,8 @@ impl FuzzingWorker {
 
         // Make sure that entries that belong to the entry are always selected.
         let mut selection = candidates
-            .drain_filter(|entry| !entry.is_nop())
+            .extract_if(|entry| !entry.is_nop())
+            // .drain_filter(|entry| !entry.is_nop())
             .collect::<Vec<_>>();
 
         let config = &self.config.phases.add;
@@ -114,7 +115,8 @@ impl FuzzingWorker {
                 .copied()
                 .collect::<Vec<_>>();
             let mut selected_candidates = candidates
-                .drain_filter(|e| selected_ids.contains(&e.id()))
+                .extract_if(|e| selected_ids.contains(&e.id()))
+                // .drain_filter(|e| selected_ids.contains(&e.id()))
                 .collect::<Vec<_>>();
             log::debug!(
                 "select_unfuzzed selected_candidates={}",
@@ -148,7 +150,8 @@ impl FuzzingWorker {
 
             // Get the MCEs that belong to the select IDs
             let mut selected_candidates = candidates
-                .drain_filter(|e| yielding_ids.contains(&e.id()))
+                .extract_if(|e| yielding_ids.contains(&e.id()))
+                // .drain_filter(|e| yielding_ids.contains(&e.id()))
                 .collect::<Vec<_>>();
             log::debug!(
                 "select_yielding selected_candidates={}",

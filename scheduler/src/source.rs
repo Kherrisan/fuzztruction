@@ -188,9 +188,9 @@ pub struct Source {
     /// POSIX MQ name for the receive queue
     mq_recv_name: String,
     /// Queue used to send messages to the target agent.
-    mq_send: Option<PosixMq>,
+    pub mq_send: Option<PosixMq>,
     /// Queue used to receive message from the target agent.
-    mq_recv: Option<PosixMq>,
+    pub mq_recv: Option<PosixMq>,
     /// The PID of the target's parent (source agent).
     pid: Option<i32>,
     mem_file: Option<File>,
@@ -200,7 +200,7 @@ pub struct Source {
     /// The memory mappings of the target application.
     /// Available after calling `.start()`.
     mappings: Option<Vec<MapRange>>,
-    aux_stream_assembler: AuxStreamAssembler,
+    pub aux_stream_assembler: AuxStreamAssembler,
     config: Option<Config>,
     jail: Option<Jail>,
     /// List of file that are not purged during workdir purging.
@@ -1104,7 +1104,6 @@ impl Source {
     fn wait_for_ok(&mut self, timeout: Duration) -> Result<()> {
         let mq_recv = self.mq_recv.as_ref().unwrap();
         let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
-        let aux_stream_handler = &mut self.aux_stream_assembler;
 
         log::trace!(
             "Waiting for MsgIdOk message for {} seconds",
@@ -1112,7 +1111,7 @@ impl Source {
         );
 
         loop {
-            Source::receive_message(aux_stream_handler, mq_recv, timeout, &mut buf)
+            self.receive_message(timeout, &mut buf)
                 .context("Failed to receive message while waiting for ok message")?;
 
             let header = MsgHeader::try_from_bytes(&buf)?;
@@ -1138,17 +1137,16 @@ impl Source {
 
     /// Wait for `timeout` long for a message of type T.
     /// Messages of different type received in between are ignored.
-    fn wait_for_message<T: Message>(&mut self, timeout: Duration) -> Result<T> {
+    pub fn wait_for_message<T: Message>(&mut self, timeout: Duration) -> Result<T> {
         let mq_recv = self.mq_recv.as_ref().unwrap();
         let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
-        let aux_stream_handler = &mut self.aux_stream_assembler;
 
         log::trace!("Waiting for message of type {:?}", T::message_type());
 
         let start_ts = Instant::now();
         let mut timeout_left = timeout;
         loop {
-            Source::receive_message(aux_stream_handler, mq_recv, timeout_left, &mut buf)
+            self.receive_message(timeout_left, &mut buf)
                 .context(format!(
                     "Failed to receive message of type {:?}",
                     T::message_type()
@@ -1230,18 +1228,16 @@ impl Source {
 
     /// Receive a message from the agent. In case it is a AuxStreamMessage message, it is directly processed.
     /// If not, the function returns and places the received message into `receive_buf`.
-    fn receive_message(
-        aux_assembler: &mut AuxStreamAssembler,
-        mq: &PosixMq,
-        timeout: Duration,
-        receive_buf: &mut [u8],
-    ) -> Result<()> {
+    pub fn receive_message(&mut self, timeout: Duration, receive_buf: &mut [u8]) -> Result<()> {
         loop {
-            mq.receive_timeout(receive_buf, timeout)?;
+            self.mq_recv
+                .as_ref()
+                .unwrap()
+                .receive_timeout(receive_buf, timeout)?;
             let header = MsgHeader::try_from_bytes(receive_buf)?;
             if header.id == MessageType::AuxStreamMessage {
                 Source::process_aux_message(
-                    aux_assembler,
+                    &mut self.aux_stream_assembler,
                     AuxStreamMessage::try_from_bytes(receive_buf)?,
                 );
                 continue;
@@ -1272,7 +1268,6 @@ impl Source {
             .mq_recv
             .as_ref()
             .expect("start() must be called first!");
-        let aux_stream_handler = &mut self.aux_stream_assembler;
 
         // Scratch buffer.
         let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
@@ -1287,9 +1282,7 @@ impl Source {
 
         // Retrive child sid thus we can kill the forked child if it is unresponsive.
         log::trace!("Waiting for the child sid");
-        Source::receive_message(
-            aux_stream_handler,
-            mq_recv,
+        self.receive_message(
             DEFAULT_RECEIVE_TIMEOUT,
             &mut buf,
         )
@@ -1300,7 +1293,7 @@ impl Source {
         // Wait for reply
         loop {
             // Get the next message
-            match Source::receive_message(aux_stream_handler, mq_recv, timeout, &mut buf) {
+            match self.receive_message(timeout, &mut buf) {
                 Ok(_) => (),
                 Err(_) => {
                     // The child did not terminated in time
@@ -1620,7 +1613,7 @@ fn set_perms_770_existing(path: &Path) {
 /// # Error:
 /// Returns Err if `killpg` fails. However, this might be caused by the process
 /// group vanishing before we could kill it.
-fn kill_child_process_group(pid_msg: &ChildPid) -> Result<()> {
+pub fn kill_child_process_group(pid_msg: &ChildPid) -> Result<()> {
     let pid = nix::unistd::Pid::from_raw(pid_msg.pid.try_into().unwrap());
     let ret = nix::sys::signal::killpg(pid, nix::sys::signal::SIGKILL);
     if let Err(err) = ret {

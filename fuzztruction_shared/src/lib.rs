@@ -7,6 +7,7 @@
 pub mod abi;
 pub mod alarm_timer;
 pub mod communication_channel;
+pub mod iosync_channel;
 pub mod dwarf;
 pub mod messages;
 //pub mod mutation_cache;

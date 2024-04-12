@@ -8,12 +8,13 @@ members = [
     "generator/agent",
     "lib/proc-maps",
     "lib/jail",
-    "lib/compute_coverage"
+    "lib/compute_coverage",
 ]
 
-exclude = [
-    "lib/llvm-stackmap-rs"
-]
+exclude = ["lib/llvm-stackmap-rs"]
 
 [profile.dev]
 opt-level = 3
+
+[dependencies]
+nix = "0.26"

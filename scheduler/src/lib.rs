@@ -17,12 +17,12 @@
     missing_debug_implementations
 )]
 #![feature(
-    hash_drain_filter,
+    hash_extract_if,
     new_uninit,
     slice_as_chunks,
     seek_stream_len,
     assert_matches,
-    drain_filter,
+    extract_if,
     thread_id_value,
     core_intrinsics
 )]

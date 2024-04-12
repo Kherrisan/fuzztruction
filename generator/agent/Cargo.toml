@@ -16,7 +16,7 @@ lazy_static = "~1"
 libc = "~0"
 llvm_stackmap =  {version = "0.1.4", features = ["serde"] }
 log = { version = "~0", features = ["kv_unstable"] }
-nix = "~0"
+nix = "0.26"
 posixmq = "~0"
 proc-maps = "~0"
 serde = { version = "~1", features = ["derive"]}

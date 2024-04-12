@@ -14,6 +14,12 @@ pub enum InputChannel {
     File,
 }
 
+impl Default for InputChannel {
+    fn default() -> Self {
+        InputChannel::None
+    }
+}
+
 /// The kind of output a program produces.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize)]
 pub enum OutputChannel {
@@ -24,4 +30,13 @@ pub enum OutputChannel {
     /// Output is written into a file. The argument representing the file path
     /// is marked as §§.
     File,
+    /// Output is send through a network socket.
+    /// The host and port is marked as $host and $port
+    Socket,
+}
+
+impl Default for OutputChannel {
+    fn default() -> Self {
+        OutputChannel::None
+    }
 }

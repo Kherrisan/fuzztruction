@@ -190,7 +190,7 @@ impl FuzzingWorker {
             // be impossible for a thread in another function to lock it if this function
             // is executed by 39 other threads.
             let mut rng = rand::thread_rng();
-            thread::sleep(Duration::from_millis(rng.gen_range(0..100)));
+            thread::sleep(Duration::from_millis(rng.gen_range(0..100u64)));
             return ControlFlow::Continue(entry);
         }
     }

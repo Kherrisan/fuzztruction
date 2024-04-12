@@ -15,6 +15,10 @@ path = "src/cli/benchmark_sink.rs"
 name = "fuzztruction"
 path = "src/cli/fuzztruction.rs"
 
+[lib]
+name = "scheduler"
+path = "src/lib.rs"
+
 [features]
 #default = ["introspection"]
 introspection = []
@@ -24,10 +28,10 @@ elf = "~0"
 gimli = "~0"
 keystone = { git = "https://github.com/keystone-engine/keystone" }
 posixmq = "~0"
-rand = "~0"
-nix = "~0"
-proc-maps = "~0"
-shared_memory = {git = "https://github.com/elast0ny/shared_memory-rs", rev = "4879c7641f64d444420b81fd32f496939ee7155d", package = "shared_memory"}
+rand = "~0.8"
+nix = { version = "0.26", features = ["user"] }
+proc-maps = { path = "../lib/proc-maps" }
+shared_memory = { git = "https://github.com/elast0ny/shared_memory-rs", rev = "4879c7641f64d444420b81fd32f496939ee7155d", package = "shared_memory" }
 mktemp = "~0"
 tempfile = "~3"
 libc = "~0"
@@ -35,10 +39,9 @@ fuzztruction_shared = { path = "../fuzztruction_shared" }
 generator-agent = { path = "../generator/agent" }
 sha2 = "~0"
 hex = "~0"
-serde = { version = "~1", features = ["derive", "rc"]}
+serde = { version = "~1", features = ["derive", "rc"] }
 serde_json = "~1"
 lazy_static = "~1"
-signal = "~0"
 filedescriptor = "~0"
 capstone = "0.7.0"
 anyhow = "~1"
@@ -65,4 +68,4 @@ itertools = "~0"
 glob = "0.3.0"
 flate2 = "1.0.22"
 fs_extra = "1.2.0"
-llvm_stackmap =  {version = "0.1.4", features = ["serde"] }
+llvm_stackmap = { version = "0.1.4", features = ["serde"] }

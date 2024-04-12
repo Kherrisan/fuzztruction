@@ -41,9 +41,9 @@ impl From<env::VarError> for CommunicationChannelError {
 }
 
 impl CommunicationChannel {
-    pub fn from_env() -> Result<CommunicationChannel, CommunicationChannelError> {
-        let recv_name = env::var(ENV_RECV_NAME)?;
-        let send_name = env::var(ENV_SEND_NAME)?;
+    pub fn from_env(agent: &str) -> Result<CommunicationChannel, CommunicationChannelError> {
+        let recv_name = env::var(format!("{ENV_RECV_NAME}_{agent}"))?;
+        let send_name = env::var(format!("{ENV_SEND_NAME}_{agent}"))?;
 
         let mq_send = PosixMq::open(&send_name);
         let mq_recv = PosixMq::open(&recv_name);
