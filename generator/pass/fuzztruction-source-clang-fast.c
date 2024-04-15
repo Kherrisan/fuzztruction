@@ -63,7 +63,7 @@ void find_pass()
     }
 
     // FIXME: this path should not be absolute.
-    if (asprintf(&guess, "/home/user/fuzztruction/generator/pass/%s", PASS_SO_NAME) < 0) {
+    if (asprintf(&guess, "/home/ubuntu/libaflnet/fuzztruction/generator/pass/%s", PASS_SO_NAME) < 0) {
         PFATAL("Failed to allocate");
     }
     if (!access(guess, R_OK))
@@ -155,7 +155,7 @@ args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings)
 
     // Link against our agent that is called by a call our pass injected into main().
     // FIXME: this path should not be absolute.
-    self->argv[self->argc++] = "-L/home/user/fuzztruction/target/debug";
+    self->argv[self->argc++] = "-L/home/ubuntu/libaflnet/fuzztruction/target/debug";
     self->argv[self->argc++] = "-lgenerator_agent";
 
     // Enable debug output.

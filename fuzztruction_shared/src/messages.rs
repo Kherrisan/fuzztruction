@@ -329,7 +329,7 @@ impl Message for ShutdownMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct TracePointStat {
     header: MsgHeader,

@@ -176,9 +176,9 @@ pub struct Source {
     /// The way output is stored.
     output_channel: OutputChannel,
     /// File used to server inputs.
-    input_file: (File, String),
+    pub input_file: (File, String),
     /// File used to store the sources output..
-    output_file: (File, String),
+    pub output_file: (File, String),
     /// File used to store the sources stdout.
     stdout_file: Option<(File, PathBuf)>,
     /// File used to store the sources stderr.

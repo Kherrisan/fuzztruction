@@ -27,6 +27,7 @@ compiler wrapper.
 */
 // as of now, parseIRFile files (destructor of IM finds uses without def)
 bool FuzztructionSourcePreprocesssingPass::replaceMemFunctions(Module &M) {
+
     bool modified = false;
 
     dbgs() << "FT DEBUG: Module name " << M.getName() << "\n";
@@ -35,8 +36,15 @@ bool FuzztructionSourcePreprocesssingPass::replaceMemFunctions(Module &M) {
         return modified;
 
     SMDiagnostic sm;
+    
+    LLVMContext &context = M.getContext();
+
+    dbgs() << "LLVMContext.shouldDiscardValueNames():" << context.shouldDiscardValueNames() << "\n" ;
+    context.setDiscardValueNames(false);
+    dbgs() << "LLVMContext.shouldDiscardValueNames():" << context.shouldDiscardValueNames() << "\n" ;
+
     // FIXME: this path should not be absolute.
-    std::unique_ptr<Module> IM = parseIRFile("/home/user/fuzztruction/generator/pass/mem_functions.ll", sm, M.getContext());
+    std::unique_ptr<Module> IM = parseIRFile("/home/ubuntu/libaflnet/fuzztruction/generator/pass/mem_functions.ll", sm, context);
     dbgs() << "FT DEBUG: mem_functions.ll IR file parsed\n";
     if (!IM) {
         errs() << "FT ERROR: ";

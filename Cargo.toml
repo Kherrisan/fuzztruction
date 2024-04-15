@@ -10,11 +10,5 @@ members = [
     "lib/jail",
     "lib/compute_coverage",
 ]
-
+edition = "2021"
 exclude = ["lib/llvm-stackmap-rs"]
-
-[profile.dev]
-opt-level = 3
-
-[dependencies]
-nix = "0.26"

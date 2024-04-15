@@ -433,9 +433,11 @@ pub extern "C" fn __ft_io_sync() {
     iosync
         .as_ref()
         .expect("IO_SYNC_CHANNEL not initialized")
-        .io_yield();
+        .io_yield()
+        .expect("Failed to yield IO_SYNC_CHANNEL");
     iosync
         .as_mut()
         .expect("IO_SYNC_CHANNEL not initialized")
-        .io_await();
+        .io_await()
+        .expect("Failed to await IO_SYNC_CHANNEL");
 }

@@ -186,10 +186,10 @@ impl IOSyncChannel {
             .parse::<usize>()
             .expect("Failed to parse IO_SYNC_SIZE");
 
-        let tx_buf = SharedRingBuffer::open(format!("IO_SYNC_TX_{name}").as_str())
-            .expect("Failed to open shared ring buffer for tx");
-        let rx_buf = SharedRingBuffer::open(format!("IO_SYNC_RX_{name}").as_str())
-            .expect("Failed to open shared ring buffer for rx");
+        let tx_buf = SharedRingBuffer::open(format!("{name}_TX").as_str())
+            .expect(format!("Failed to open shared ring buffer for the tx of {agent}").as_str());
+        let rx_buf = SharedRingBuffer::open(format!("{name}_RX").as_str())
+            .expect(format!("Failed to open shared ring buffer for the rx of {agent}").as_str());
         let tx = Sender::new(tx_buf);
         let rx = Receiver::new(rx_buf);
 

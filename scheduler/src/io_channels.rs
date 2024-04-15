@@ -12,6 +12,7 @@ pub enum InputChannel {
     /// Input is consumed via a file. The argument that is replaced by the
     /// path to the input file must be marked with @@.
     File,
+    Socket,
 }
 
 impl Default for InputChannel {
@@ -31,7 +32,6 @@ pub enum OutputChannel {
     /// is marked as §§.
     File,
     /// Output is send through a network socket.
-    /// The host and port is marked as $host and $port
     Socket,
 }
 
