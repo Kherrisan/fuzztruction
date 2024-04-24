@@ -1,4 +1,3 @@
-use fuzztruction_shared::iosync_channel::IOSyncChannel;
 use fuzztruction_shared::messages;
 use fuzztruction_shared::{
     communication_channel::{CommunicationChannel, CommunicationChannelError},
@@ -47,7 +46,6 @@ lazy_static! {
     /// Mappings of the processes's virtual address space.
     pub static ref PROC_MAPPINGS: Mutex<Option<Vec<proc_maps::MapRange>>> = Mutex::new(None);
     pub static ref COMMUNICATION_CHANNEL: Mutex<Option<CommunicationChannel>> = Mutex::new(None);
-    pub static ref IO_SYNC_CHANNEL: Mutex<Option<IOSyncChannel>> = Mutex::new(None);
 }
 
 /// Send the given message to the coordinator.
@@ -115,11 +113,6 @@ pub fn start_forkserver() {
     println!("Entering start_forkserver()");
     for (key, value) in env::vars() {
         println!("Source agent loads env: {}={}", key, value);
-    }
-
-    let iosync_new = IOSyncChannel::from_env(AGENT_NAME);
-    if let Ok(mut iosync) = IO_SYNC_CHANNEL.try_lock() {
-        *iosync = Some(iosync_new);
     }
 
     println!("Source setting up COMMUNICATION_CHANNEL");
@@ -430,21 +423,4 @@ fn process_messages() {
             _ => panic!("Unhandled message: {:#?}", new_msg),
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn __ft_io_sync() {
-    let mut iosync = IO_SYNC_CHANNEL
-        .try_lock()
-        .expect("Failed to unlock IO_SYNC_CHANNEL");
-    iosync
-        .as_mut()
-        .expect("IO_SYNC_CHANNEL not initialized")
-        .io_yield()
-        .expect("Failed to yield IO_SYNC_CHANNEL");
-    iosync
-        .as_mut()
-        .expect("IO_SYNC_CHANNEL not initialized")
-        .io_await()
-        .expect("Failed to await IO_SYNC_CHANNEL");
 }

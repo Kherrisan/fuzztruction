@@ -44,7 +44,7 @@ bool FuzztructionSourcePreprocesssingPass::replaceMemFunctions(Module &M) {
     dbgs() << "LLVMContext.shouldDiscardValueNames():" << context.shouldDiscardValueNames() << "\n" ;
 
     // FIXME: this path should not be absolute.
-    std::unique_ptr<Module> IM = parseIRFile("/home/ubuntu/libaflnet/fuzztruction/generator/pass/mem_functions.ll", sm, context);
+    std::unique_ptr<Module> IM = parseIRFile("/home/ubuntu/pingu/fuzztruction/generator/pass/mem_functions.ll", sm, context);
     dbgs() << "FT DEBUG: mem_functions.ll IR file parsed\n";
     if (!IM) {
         errs() << "FT ERROR: ";
