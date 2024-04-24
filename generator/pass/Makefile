@@ -9,7 +9,7 @@ CXXFLAGS    ?= -O3 -funroll-loops -g -Wall
 
 # Used for llvm pass compilation
 LLVM_CONFIG ?= $(BASE)/bin/llvm-config
-CLANG_CFL    = `$(LLVM_CONFIG) --cxxflags` -Wl,-znodelete -fno-rtti -fpic $(CXXFLAGS)
+CLANG_CFL    = `$(LLVM_CONFIG) --cxxflags` -Wl,-znodelete -fno-rtti -fpic $(CXXFLAGS) -DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING
 CLANG_LFL    = `$(LLVM_CONFIG) --ldflags` $(LDFLAGS)
 
 TARGETS = fuzztruction-source-llvm-pass.so fuzztruction-source-clang-fast fuzztruction-source-clang-fast++ mem_functions.ll
