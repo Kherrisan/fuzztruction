@@ -8,9 +8,6 @@ use anyhow::{Context, Result};
 
 use thiserror::Error;
 
-static ENV_SEND_NAME: &str = "FT_MQ_SEND";
-static ENV_RECV_NAME: &str = "FT_MQ_RECV";
-
 #[derive(Error, Debug)]
 pub enum CommunicationChannelError {
     #[error("Failed to find required environment variable. Did you export it?")]
@@ -28,8 +25,8 @@ pub enum CommunicationChannelError {
 pub struct CommunicationChannel {
     mq_send: Option<PosixMq>,
     mq_receive: Option<PosixMq>,
-    recv_name: String,
-    send_name: String,
+    pub recv_name: String,
+    pub send_name: String,
     /// Buffer used during message retrival to store the received bytes.
     buffer: Vec<u8>,
 }
@@ -42,8 +39,8 @@ impl From<env::VarError> for CommunicationChannelError {
 
 impl CommunicationChannel {
     pub fn from_env(agent: &str) -> Result<CommunicationChannel, CommunicationChannelError> {
-        let recv_name = env::var(format!("{ENV_RECV_NAME}_{agent}"))?;
-        let send_name = env::var(format!("{ENV_SEND_NAME}_{agent}"))?;
+        let recv_name = env::var(format!("FT_MQ_{agent}_RECV"))?;
+        let send_name = env::var(format!("FT_MQ_{agent}_SEND"))?;
 
         let mq_send = PosixMq::open(&send_name);
         let mq_recv = PosixMq::open(&recv_name);

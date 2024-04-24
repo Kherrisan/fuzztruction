@@ -7,7 +7,12 @@
 //     variant_size_differences,
 //     clippy::redundant_pattern,
 // )]
-#![allow(clippy::vec_box, clippy::identity_op, clippy::single_match)]
+#![allow(
+    clippy::vec_box,
+    clippy::identity_op,
+    clippy::single_match,
+    internal_features
+)]
 #![deny(
     clippy::correctness,
     clippy::cast_possible_wrap,

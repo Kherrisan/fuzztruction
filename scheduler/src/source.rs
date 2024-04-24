@@ -15,6 +15,7 @@ use jail::jail::{Jail, JailBuilder};
 use llvm_stackmap::LocationType;
 use std::{
     collections::HashMap,
+    env,
     fmt::Debug,
     path::Path,
     str::FromStr,
@@ -41,7 +42,10 @@ use std::io;
 use std::{convert::TryFrom, ffi::CString};
 use std::{fs::OpenOptions, io::prelude::*};
 
-use log::{error, kv::ToValue};
+use log::{
+    error,
+    kv::{ToKey, ToValue},
+};
 
 use lazy_static::lazy_static;
 use libc::{self};
@@ -168,7 +172,7 @@ pub struct Source {
     /// Args passed to the binary (excluding argv[0]).
     args: Vec<String>,
     /// Workdir
-    workdir: PathBuf,
+    pub workdir: PathBuf,
     /// Directory containing data related to the sources state.
     state_dir: PathBuf,
     /// The way input is consumed.
@@ -243,8 +247,8 @@ impl Source {
             .collect();
         rand_suffix += &format!("_tid_{}", unsafe { libc::gettid().to_string() });
 
-        let mq_send_name: String = "/mq_send_".to_owned() + &rand_suffix;
-        let mq_recv_name: String = "/mq_recv_".to_owned() + &rand_suffix;
+        let mq_send_name: String = "/mq_source_send_".to_owned() + &rand_suffix;
+        let mq_recv_name: String = "/mq_source_recv_".to_owned() + &rand_suffix;
 
         let tmpfile = Temp::new_file_in(&workdir).expect("Failed to create tempfile.");
         let input_output_prefix_path = tmpfile.to_str().unwrap();
@@ -290,22 +294,22 @@ impl Source {
         let input_file = (file_in, file_in_name);
         let mut output_file = (file_out, out_file_path);
 
-        let stdout_file = None;
-        // if log_stdout {
-        //     // Setup file for stdout logging.
-        //     let mut path = workdir.clone();
-        //     path.push("stdout");
-        //     workdir_file_whitelist.push(path.clone());
+        let mut stdout_file = None;
+        if log_stdout {
+            // Setup file for stdout logging.
+            let mut path = workdir.clone();
+            path.push("stdout");
+            workdir_file_whitelist.push(path.clone());
 
-        //     let file = OpenOptions::new()
-        //         .read(true)
-        //         .write(true)
-        //         .create(true)
-        //         .truncate(true)
-        //         .open(&path)
-        //         .unwrap();
-        //     stdout_file = Some((file, path));
-        // }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            stdout_file = Some((file, path));
+        }
 
         let mut stderr_file = None;
         if log_stderr {
@@ -525,20 +529,18 @@ impl Source {
 
         log::debug!("Creating POSIX queues");
         log::debug!("Creating sending MQ: {}", self.mq_send_name);
-        self.mq_send = Some(
-            posixmq::OpenOptions::readwrite()
-                .create_new()
-                .open(&self.mq_send_name)
-                .context("Failed to create send MQ")?,
-        );
+        let mq_send = posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open(&self.mq_send_name)
+            .context("Failed to create send MQ")?;
+        self.mq_send = Some(mq_send);
 
         log::debug!("Creating receiving MQ: {}", self.mq_recv_name);
-        self.mq_recv = Some(
-            posixmq::OpenOptions::readwrite()
-                .create_new()
-                .open(&self.mq_recv_name)
-                .context("Failed to create recv MQ")?,
-        );
+        let mq_recv = posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open(&self.mq_recv_name)
+            .context("Failed to create recv MQ")?;
+        self.mq_recv = Some(mq_recv);
 
         let child_pid;
         unsafe {
@@ -584,13 +586,13 @@ impl Source {
                     // Create the environment pointer array.
                     let mut envp: Vec<CString> = Vec::new();
                     let env_mq_recv = CString::new(
-                        format!("FT_MQ_SEND={}", self.mq_recv_name.as_str()).as_bytes(),
+                        format!("FT_MQ_SOURCE_SEND={}", self.mq_recv_name.as_str()).as_bytes(),
                     )
                     .expect("Failed to format FT_MQ_SEND");
                     envp.push(env_mq_recv);
 
                     let env_mq_send = CString::new(
-                        format!("FT_MQ_RECV={}", self.mq_send_name.as_str()).as_bytes(),
+                        format!("FT_MQ_SOURCE_RECV={}", self.mq_send_name.as_str()).as_bytes(),
                     )
                     .expect("Failed to format FT_MQ_RECV");
                     envp.push(env_mq_send);
@@ -655,24 +657,25 @@ impl Source {
                             libc::dup2(self.output_file.0.as_raw_fd(), libc::STDOUT_FILENO);
                             libc::close(self.output_file.0.as_raw_fd());
                         }
-                        _ => {
-                            if !self.log_stdout {
-                                libc::dup2(dev_null_fd, libc::STDOUT_FILENO);
-                            } else {
-                                // let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
-                                // libc::dup2(fd, libc::STDOUT_FILENO);
-                                // libc::close(fd);
-                            }
-                        }
+                        _ => {}
                     }
 
-                    if self.log_stderr {
-                        // let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
-                        // libc::dup2(fd, libc::STDERR_FILENO);
-                        // libc::close(fd);
+                    log::debug!("Redirecting stdout to {:?}", self.stdout_file);
+                    if !self.log_stdout {
+                        libc::dup2(dev_null_fd, libc::STDOUT_FILENO);
                     } else {
-                        libc::dup2(dev_null_fd, libc::STDERR_FILENO);
+                        let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
+                        libc::dup2(fd, libc::STDOUT_FILENO);
+                        libc::close(fd);
                     }
+
+                    // if self.log_stderr {
+                    //     // let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
+                    //     // libc::dup2(fd, libc::STDERR_FILENO);
+                    //     // libc::close(fd);
+                    // } else {
+                    //     libc::dup2(dev_null_fd, libc::STDERR_FILENO);
+                    // }
 
                     libc::close(dev_null_fd);
                     libc::close(self.output_file.0.as_raw_fd());
@@ -704,8 +707,26 @@ impl Source {
                     assert_eq!(ret, 0);
 
                     // Disable ASLR since we rely on all instances having the same memory layout.
-                    let ret = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
-                    assert_eq!(ret, 0);
+                    let _ = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
+                    let check_personality = libc::personality(0xffffffff);
+                    if check_personality & libc::ADDR_NO_RANDOMIZE == 0 {
+                        let err = std::io::Error::last_os_error();
+                        let errno = err.raw_os_error().unwrap_or(0);
+                        // 根据错误码进行判断
+                        match errno {
+                            libc::EINVAL => {
+                                log::error!("Invalid argument");
+                            }
+                            libc::EPERM => {
+                                log::error!("Operation not permitted");
+                            }
+                            // 其他错误处理...
+                            _ => {
+                                log::error!("Unknown error: {}", errno);
+                            }
+                        }
+                        panic!("Failed to disable ASLR");
+                    }
 
                     std::env::set_current_dir(&self.workdir).unwrap();
                     if let Some(ref mut jail) = self.jail {
@@ -723,6 +744,10 @@ impl Source {
                     // ! that normally load instrumented libraries during runtime.
                     assert_eq!(nix::unistd::getuid(), nix::unistd::geteuid());
                     assert_eq!(nix::unistd::getegid(), nix::unistd::getegid());
+
+                    // Copy all environment variables from current process into the new process
+                    env::vars()
+                        .for_each(|e| envp.push(CString::new(format!("{}={}", e.0, e.1)).unwrap()));
 
                     nix::unistd::execve(prog, &argv, &envp).unwrap();
                     unreachable!();
@@ -1189,14 +1214,14 @@ impl Source {
     }
 
     /// Process a JSON encoded `LogRecordWrapper` object and pass it to the logging backend.
-    fn process_log_record_message(msg: String) {
+    pub fn process_log_record_message(msg: String) {
         let record = serde_json::from_str::<LogRecordWrapper>(&msg);
         if let Err(r) = record {
             log::error!("Failed to decode log message: {}. Err({})", msg, r);
             return;
         }
 
-        let record = record.unwrap();
+        let mut record = record.unwrap();
         let mut builder = log::RecordBuilder::new();
         builder.level(record.level);
         let mod_path = record.module_path.as_deref();
@@ -1205,9 +1230,24 @@ impl Source {
         builder.file(record.file.as_deref());
         builder.target(record.target.as_str());
 
+        let msg_source = record.log_source.take().unwrap_or("fuzzer".to_string());
+        let tid = record
+            .tid
+            .take()
+            .unwrap_or_else(|| unsafe { libc::gettid() })
+            .to_string();
+        let time = record
+            .time
+            .take()
+            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+        let kvs = [
+            ("log_source".to_key(), msg_source.as_str()),
+            ("tid".to_key(), tid.as_str()),
+            ("time".to_key(), time.as_str()),
+        ];
+        builder.key_values(&kvs);
+
         let logger = log::logger();
-        let kv = (log::kv::Key::from_str("from_agent"), true.to_value());
-        builder.key_values(&kv);
         logger.log(&builder.args(format_args!("{}", &record.message)).build());
     }
 
@@ -1282,11 +1322,8 @@ impl Source {
 
         // Retrive child sid thus we can kill the forked child if it is unresponsive.
         log::trace!("Waiting for the child sid");
-        self.receive_message(
-            DEFAULT_RECEIVE_TIMEOUT,
-            &mut buf,
-        )
-        .context("Failed to receive child pid")?;
+        self.receive_message(DEFAULT_RECEIVE_TIMEOUT, &mut buf)
+            .context("Failed to receive child pid")?;
         let pid_msg = ChildPid::try_from_bytes(&buf)?;
         log::trace!("Got child sid: {}", pid_msg.pid);
 
@@ -1697,5 +1734,43 @@ impl Drop for Source {
     /// Stop the child if the Source get dropped.
     fn drop(&mut self) {
         self.stop().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proc_maps::{get_process_maps, MapRange, Pid};
+
+    fn get_stack_mapping(pid: Pid) -> MapRange {
+        let mappings = get_process_maps(pid).unwrap();
+        mappings
+            .iter()
+            .find(|m| m.pathname.is_some() && m.pathname.as_ref().unwrap() == "[stack]")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn mq() {
+        posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open("123456")
+            .unwrap();
+    }
+
+    #[test]
+    fn disable_aslr() {
+        let pid = std::process::id();
+        let old_personality = unsafe { libc::personality(0xffffffff) };
+        if old_personality & libc::ADDR_NO_RANDOMIZE != 0 {
+            println!("ASLR is already disabled.");
+        }
+        let rtn = unsafe { libc::personality(libc::ADDR_NO_RANDOMIZE as u64) };
+        println!(
+            "libc::personality(libc::ADDR_NO_RANDOMIZE) returns: {:#?}",
+            rtn
+        );
+        let stack_mapping = get_stack_mapping(pid as i32);
+        println!("stack mapping: {:#?}", stack_mapping);
     }
 }

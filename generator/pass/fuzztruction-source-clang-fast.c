@@ -120,7 +120,8 @@ args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings)
     self->argv = malloc(sizeof(*self->argv) * max_args);
 
     /* Inject/Replace arguments */
-    self->argv[self->argc++] = arg_settings->is_cxx ? "clang++" : "clang";
+    self->argv[self->argc++] = arg_settings->is_cxx ? "/home/ubuntu/llvm-ft/build/bin/clang++" : "/home/ubuntu/llvm-ft/build/bin/clang";
+    // self->argv[self->argc++] = arg_settings->is_cxx ? "clang++" : "clang";
     // Ignore unkown args
     self->argv[self->argc++] = "-Qunused-arguments";
 
@@ -158,8 +159,12 @@ args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings)
     self->argv[self->argc++] = "-L/home/ubuntu/libaflnet/fuzztruction/target/debug";
     self->argv[self->argc++] = "-lgenerator_agent";
 
+    // Replace the macro __FT_IO_SYNC with a call to our custom function: __ft_io_sync()
+    self->argv[self->argc++] = "-D__FT_IO_SYNC=__ft_io_sync()";
+    self->argv[self->argc++] = "-I/home/ubuntu/libaflnet/fuzztruction/generator/pass";
+
     // Enable debug output.
-    //self->argv[self->argc++] = "-v";
+    // self->argv[self->argc++] = "-v";
     self->argv[self->argc] = NULL;
     return self;
 }

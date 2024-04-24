@@ -14,6 +14,7 @@ use libc::waitpid;
 use log::*;
 use messages::{Message, RunMessage, SyncMutations, TerminatedMessage};
 use mutation_cache::{MutationCache, MutationCacheEntryFlags};
+use std::env;
 use std::time::Instant;
 use std::{
     collections::HashSet,
@@ -111,11 +112,17 @@ const AGENT_NAME: &str = "SOURCE";
 
 /// Spin-up the forkserver by setting up communication to the coordinator.
 pub fn start_forkserver() {
+    println!("Entering start_forkserver()");
+    for (key, value) in env::vars() {
+        println!("Source agent loads env: {}={}", key, value);
+    }
+
     let iosync_new = IOSyncChannel::from_env(AGENT_NAME);
     if let Ok(mut iosync) = IO_SYNC_CHANNEL.try_lock() {
         *iosync = Some(iosync_new);
     }
 
+    println!("Source setting up COMMUNICATION_CHANNEL");
     let new_cc = CommunicationChannel::from_env(AGENT_NAME);
     match new_cc {
         // Assume that we are not executed by the coordinator, just execute the
@@ -124,7 +131,6 @@ pub fn start_forkserver() {
         Err(err) => panic!("Unexpected error: {:?}", err),
         Ok(_) => (),
     }
-
     let mut cc_guard = COMMUNICATION_CHANNEL.try_lock().unwrap();
     *cc_guard = Some(new_cc.unwrap());
     let cc = cc_guard.as_ref().unwrap();
@@ -132,13 +138,14 @@ pub fn start_forkserver() {
     cc.unlink();
     drop(cc_guard);
 
+    println!("Source setting up logger");
     let level = std::env::var(ENV_LOG_LEVEL).unwrap_or("Debug".to_owned());
     let level = log::Level::from_str(&level).unwrap();
     logging::setup_logger(level).unwrap();
     logging::setup_panic_logging();
 
-    log::info!("Starting forkserver");
-    log::info!("Agent log level is {}", level);
+    log::info!("Source starting forkserver");
+    log::info!("Source agent log level is {}", level);
 
     let trace_map = tracing::TraceMap::new();
     let mut trace_map_guard = TRACE_MAP.lock().unwrap();
@@ -210,7 +217,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
     // thus we can restore the original binary later. This will only snapshot
     // those patch points we never touched before.
     for entry in entries.iter() {
-        agent.jit.snapshot_patch_point(entry.clone());
+        agent.jit.snapshot_patch_point(entry);
     }
 
     // The function used to report patch point hits during tracing.
@@ -332,7 +339,7 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
 
             // Drop the communication channel to prevet child from sending
             // messages.
-            COMMUNICATION_CHANNEL.lock().unwrap().take();
+            // COMMUNICATION_CHANNEL.lock().unwrap().take();
 
             // Prevent the child from messing with the mutation cache. However, keep it mapped,
             // for accessing the mutation masks and updating runtime vars.
@@ -399,7 +406,7 @@ fn process_messages() {
     loop {
         let new_msg = recv_message(DEFAULT_TIMEOUT_MS);
         let new_msg = new_msg.expect("Failed to receive message from parent.");
-        log::trace!("Received new message {:?}", &new_msg);
+        log::debug!("Received new message {:?}", &new_msg);
 
         match new_msg {
             ReceivableMessages::SyncMutations(msg) => {
@@ -431,7 +438,7 @@ pub extern "C" fn __ft_io_sync() {
         .try_lock()
         .expect("Failed to unlock IO_SYNC_CHANNEL");
     iosync
-        .as_ref()
+        .as_mut()
         .expect("IO_SYNC_CHANNEL not initialized")
         .io_yield()
         .expect("Failed to yield IO_SYNC_CHANNEL");

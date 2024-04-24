@@ -240,7 +240,7 @@ impl MutationCache {
             let l = alloc::Layout::new::<MutationCacheContent>();
             assert!(mapping as usize % l.align() == 0);
 
-            let ptr = mapping as *mut u8 as *mut MutationCacheContent;
+            let ptr = mapping as *mut MutationCacheContent;
             let mutation_cache_content: &mut MutationCacheContent = ptr.as_mut().unwrap();
             if create {
                 mutation_cache_content.init(size);
@@ -566,7 +566,69 @@ impl MutationCache {
 }
 
 mod test {
+    use std::{ffi::CString, mem::transmute, ptr};
+
+    use libc::c_void;
+    use rand::{distributions::Alphanumeric, thread_rng, Rng};
+
+    use crate::mutation_cache_content::MutationCacheContent;
+
+    use super::MUTATION_CACHE_DEFAULT_SIZE;
+
+    fn generate_random_string(length: usize) -> String {
+        let rng = thread_rng();
+        let random_string: String = rng
+            .sample_iter(&Alphanumeric)
+            .take(length)
+            .map(char::from)
+            .collect();
+        random_string
+    }
 
     #[test]
-    fn test() {}
+    fn mem_mapping_transmute() {
+        let name = format!("testing_{}", generate_random_string(4));
+        let size = MUTATION_CACHE_DEFAULT_SIZE;
+        unsafe {
+            let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL;
+            let c_name = CString::new(name.clone()).unwrap();
+            let fd = libc::shm_open(c_name.as_ptr(), flags, 0o777);
+            if fd < 0 {
+                let err = format!("Failed to open shm {}", name);
+                log::error!("{}", err);
+                return;
+            }
+            log::trace!("Truncating fd {fd} to {size} bytes");
+            let ret = libc::ftruncate(fd, size as i64);
+            if ret != 0 {
+                log::error!("Failed to ftruncate shm");
+                return;
+            }
+
+            let mapping = libc::mmap(
+                0 as *mut libc::c_void,
+                // ptr::null() as *mut c_void,
+                size,
+                libc::PROT_WRITE | libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+
+            if mapping == libc::MAP_FAILED {
+                log::error!("Failed to map shm into addresspace");
+                return;
+            }
+
+            // Check alignment. Implment logging and sanitize messages
+            let l = std::alloc::Layout::new::<MutationCacheContent>();
+            assert!(mapping as usize % l.align() == 0);
+
+            // let ptr = mapping as *mut MutationCacheContent;
+            let ptr = transmute::<*mut libc::c_void, *mut MutationCacheContent>(mapping);
+            let mutation_cache_content: &mut MutationCacheContent = ptr.as_mut().unwrap();
+
+            mutation_cache_content.init(size);
+        }
+    }
 }

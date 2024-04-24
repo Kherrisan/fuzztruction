@@ -6,13 +6,13 @@ use anyhow::{anyhow, Context, Result};
 use ipmpsc::{Receiver, Sender, SharedRingBuffer};
 use serde::{Deserialize, Serialize};
 
-const IOSYNC_TIMEOUT: Duration = Duration::from_millis(10);
+const IOSYNC_TIMEOUT: Duration = Duration::from_micros(100);
 pub const IOSYNC_BUF_SIZE_DEFAULT: usize = 1024;
 
 // #[derive(Debug, Error)]
 // #[allow(unused)]
 // pub enum IOSyncChannelError {
-    
+
 // }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -25,6 +25,7 @@ pub struct IOSyncChannel {
     rx: Receiver,
     size: usize,
     seq: usize,
+    peer_seq: usize,
     interrupted: Arc<RwLock<bool>>,
 }
 
@@ -54,6 +55,7 @@ impl IOSyncChannel {
             rx,
             size: shm_size,
             seq: 0,
+            peer_seq: 0,
             interrupted: Arc::new(RwLock::new(false)),
         }
     }
@@ -73,7 +75,8 @@ impl IOSyncChannel {
         }
     }
 
-    pub fn io_yield(&self) -> Result<()> {
+    pub fn io_yield(&mut self) -> Result<()> {
+        log::trace!("Yielding the iosync event with seq: {}", self.seq);
         let mut total_trials = 0;
         loop {
             match self.interrupted.read() {
@@ -90,36 +93,28 @@ impl IOSyncChannel {
             match self.tx.send_timeout(&msg, IOSYNC_TIMEOUT) {
                 Ok(sent) => {
                     if sent {
+                        self.seq += 1;
                         break;
                     } else {
-                        let seq = self.seq;
-                        log::warn!(
-                            "[{name}] Synchronizing {seq} timeout, retrying...",
-                            name = self.name
-                        );
+                        log::warn!("Sending {:#?} timeout, retrying...", msg);
                         total_trials += 1;
                     }
                 }
                 Err(e) => {
-                    log::error!(
-                        "[{name}] Failed to send message, retrying...error is {e}",
-                        name = self.name
-                    );
+                    log::error!("Failed to send {:#?}, retrying...error is {e}", msg);
                     total_trials += 1;
                 }
             }
             if total_trials >= 10 {
-                log::error!(
-                    "[{name}] Failed to send message, trials out",
-                    name = self.name
-                );
-                return Err(anyhow!(format!("Failed to send message, trials out")));
+                log::error!("Failed to send {:#?}, trials out", msg);
+                return Err(anyhow!(format!("Failed to send {:#?}, trials out", msg)));
             }
         }
         Ok(())
     }
 
     pub fn io_await(&mut self) -> Result<bool> {
+        log::trace!("Awaiting for the next iosync event with seq: {}", self.peer_seq);
         let mut total_tmout = 0_u128;
         loop {
             match self.interrupted.read() {
@@ -136,19 +131,17 @@ impl IOSyncChannel {
                 Ok(msg) => {
                     if let Some(msg) = msg {
                         let IOSyncMessage(seq) = msg;
-                        if seq == self.seq {
+                        if seq == self.peer_seq {
                             log::trace!(
-                                "[{name}] Synchronized {seq} successfully",
-                                name = self.name
+                                "Received IOSyncMessage({seq})"
                             );
-                            self.seq += 1;
+                            self.peer_seq += 1;
                             break;
                         }
                     } else {
                         log::trace!(
-                            "[{name}] Synchronizing {seq} timeout, retrying...",
+                            "Waiting for IOSyncMessage({seq}) timeout, retrying...",
                             seq = self.seq,
-                            name = self.name
                         );
                     }
                 }
@@ -158,11 +151,7 @@ impl IOSyncChannel {
             }
             total_tmout += IOSYNC_TIMEOUT.as_micros();
             if total_tmout >= 10_000_000 {
-                log::trace!(
-                    "[{name}] Synchronizing {seq} timeout for 10ms",
-                    seq = self.seq,
-                    name = self.name
-                );
+                log::trace!("Synchronizing {seq} timeout for 10ms", seq = self.seq);
                 return Ok(false);
             }
         }
@@ -170,6 +159,7 @@ impl IOSyncChannel {
     }
 
     pub fn to_env(&self, agent: &str) {
+        log::debug!("Setting up env vars for IO_SYNC_{agent}", agent = agent);
         env::set_var(format!("IO_SYNC_{agent}"), self.name.clone());
         env::set_var(
             format!("{name}_SIZE", name = self.name),
@@ -186,12 +176,14 @@ impl IOSyncChannel {
             .parse::<usize>()
             .expect("Failed to parse IO_SYNC_SIZE");
 
+        log::debug!("Setting up ioSyncChannel {name}_TX for rx from environment");
         let tx_buf = SharedRingBuffer::open(format!("{name}_TX").as_str())
             .expect(format!("Failed to open shared ring buffer for the tx of {agent}").as_str());
+        log::debug!("Setting up ioSyncChannel {name}_RX for tx from environment");
         let rx_buf = SharedRingBuffer::open(format!("{name}_RX").as_str())
             .expect(format!("Failed to open shared ring buffer for the rx of {agent}").as_str());
-        let tx = Sender::new(tx_buf);
-        let rx = Receiver::new(rx_buf);
+        let tx = Sender::new(rx_buf);
+        let rx = Receiver::new(tx_buf);
 
         IOSyncChannel {
             name: name.to_string(),
@@ -199,6 +191,7 @@ impl IOSyncChannel {
             rx,
             size,
             seq: 0,
+            peer_seq: 0,
             interrupted: Arc::new(RwLock::new(false)),
         }
     }
