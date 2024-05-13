@@ -1,6 +1,7 @@
+use fuzztruction_shared::mutation_cache_entry::MutationCacheEntry;
 use rand::{self, Rng};
 use serde::{Deserialize, Serialize};
-use std::{cmp, fmt, sync::Arc, time::Duration};
+use std::{cell::RefCell, cmp, fmt, rc::Rc, sync::Arc, time::Duration};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum MutatorType {
@@ -18,7 +19,7 @@ pub enum MutatorType {
 /// Thus, each iteration must revert the mutations from the previous iteration
 /// and in case the mutator is dropped, the last applied mutation must also be
 /// reverted.
-pub trait Mutator: Iterator + fmt::Debug {
+pub trait Mutator<'a>: Iterator + fmt::Debug {
     fn mutator_type(&self) -> MutatorType;
 
     /// This Mutator needs the source to be synchronized before it is
@@ -48,6 +49,8 @@ pub trait Mutator: Iterator + fmt::Debug {
     fn steps_left(&self) -> usize {
         self.steps_total() - self.steps_done()
     }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>>;
 }
 
 // /// A Mutator that replaces a byte at a random index with a random value.
@@ -139,7 +142,7 @@ pub trait Mutator: Iterator + fmt::Debug {
 /// A Mutator that replaces a byte at a random index with a random value.
 pub struct RandomByte<'a, const N: usize> {
     /// The buffer that is mutated.
-    buffer: &'a mut [u8],
+    mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
     /// Number of iterations we already performed.
     current_step: usize,
     /// Maximum number of iterations.
@@ -152,13 +155,13 @@ pub struct RandomByte<'a, const N: usize> {
 
 impl<const N: usize> RandomByte<'_, N> {
     /// Create a new mutator. Returns None, if the backing buffer is smaller than N.
-    pub fn new(buffer: &mut [u8], steps: usize) -> Option<RandomByte<N>> {
-        if buffer.len() < N {
+    pub fn new(mce: Rc<RefCell<&mut MutationCacheEntry>>, steps: usize) -> Option<RandomByte<N>> {
+        if mce.borrow().get_msk_as_slice().len() < N {
             return None;
         }
 
         Some(RandomByte {
-            buffer,
+            mce,
             current_step: 0,
             max_step: steps,
             last_idx: None,
@@ -174,12 +177,12 @@ impl<const N: usize> fmt::Debug for RandomByte<'_, N> {
             .field("max_step", &self.max_step)
             .field("last_idx", &self.last_idx)
             .field("saved_bytes", &self.saved_bytes)
-            .field("buffer.len()", &self.buffer.len())
+            .field("buffer.len()", &self.mce.borrow().get_msk_as_slice().len())
             .finish_non_exhaustive()
     }
 }
 
-impl<const N: usize> Mutator for RandomByte<'_, N> {
+impl<'a, const N: usize> Mutator<'a> for RandomByte<'a, N> {
     fn steps_total(&self) -> usize {
         self.max_step
     }
@@ -191,15 +194,21 @@ impl<const N: usize> Mutator for RandomByte<'_, N> {
     fn mutator_type(&self) -> MutatorType {
         MutatorType::RandomByte(N)
     }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        self.mce.clone()
+    }
 }
 
 impl<const N: usize> Iterator for RandomByte<'_, N> {
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mce = self.mce.borrow();
+        let mask = mce.get_msk_as_slice();
         // Revert previous mutation.
         if let Some(idx) = self.last_idx.take() {
-            self.buffer[idx..(idx + N)].copy_from_slice(&self.saved_bytes);
+            mask[idx..(idx + N)].copy_from_slice(&self.saved_bytes);
         }
 
         if self.current_step == self.max_step {
@@ -209,11 +218,11 @@ impl<const N: usize> Iterator for RandomByte<'_, N> {
 
         // Mutate
         let mut rng = rand::thread_rng();
-        let last_idx = rng.gen_range(0..=(self.buffer.len() - N));
+        let last_idx = rng.gen_range(0..=(mask.len() - N));
         self.saved_bytes
-            .copy_from_slice(&self.buffer[last_idx..(last_idx + N)]);
+            .copy_from_slice(&mask[last_idx..(last_idx + N)]);
 
-        self.buffer[last_idx..(last_idx + N)]
+        mask[last_idx..(last_idx + N)]
             .iter_mut()
             .for_each(|e| *e ^= rng.gen::<u8>());
         self.last_idx = Some(last_idx);
@@ -226,7 +235,7 @@ impl<const N: usize> Iterator for RandomByte<'_, N> {
 impl<const N: usize> Drop for RandomByte<'_, N> {
     fn drop(&mut self) {
         if let Some(idx) = self.last_idx.take() {
-            self.buffer[idx..(idx + N)].copy_from_slice(&self.saved_bytes);
+            self.mce.borrow().get_msk_as_slice()[idx..(idx + N)].copy_from_slice(&self.saved_bytes);
         }
     }
 }
@@ -239,7 +248,7 @@ pub type RandomByte4<'a> = RandomByte<'a, 4>;
 /// A Mutator that consecutively flips each byte.
 pub struct FlipByte<'a> {
     /// The mutated buffer.
-    buffer: &'a mut [u8],
+    mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
     /// The next byte index that is mutated.
     next_idx: usize,
     /// Index of the last byte we mutated.
@@ -250,11 +259,11 @@ pub struct FlipByte<'a> {
 
 impl FlipByte<'_> {
     #[allow(unused)]
-    pub fn new(buffer: &mut [u8]) -> FlipByte {
-        let size = buffer.len();
+    pub fn new(mce: Rc<RefCell<&mut MutationCacheEntry>>) -> FlipByte {
+        let size = mce.borrow().get_msk_as_slice().len();
 
         FlipByte {
-            buffer,
+            mce,
             next_idx: 0,
             last_idx: None,
             orig_byte: 0,
@@ -268,14 +277,14 @@ impl fmt::Debug for FlipByte<'_> {
             .field("next_idx", &self.next_idx)
             .field("last_idx", &self.last_idx)
             .field("orig_byte", &self.orig_byte)
-            .field("buffer.len()", &self.buffer.len())
+            .field("buffer.len()", &self.mce.borrow().get_msk_as_slice().len())
             .finish_non_exhaustive()
     }
 }
 
-impl Mutator for FlipByte<'_> {
+impl<'a> Mutator<'a> for FlipByte<'a> {
     fn steps_total(&self) -> usize {
-        self.buffer.len()
+        self.mce.borrow().get_msk_as_slice().len()
     }
 
     fn steps_done(&self) -> usize {
@@ -285,25 +294,31 @@ impl Mutator for FlipByte<'_> {
     fn mutator_type(&self) -> MutatorType {
         MutatorType::FlipByte
     }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        self.mce.clone()
+    }
 }
 
 impl Iterator for FlipByte<'_> {
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mce = self.mce.borrow();
+        let mask = mce.get_msk_as_slice();
         // Revert previous mutation.
         if let Some(idx) = self.last_idx.take() {
-            self.buffer[idx] = self.orig_byte;
+            mask[idx] = self.orig_byte;
         }
 
-        if self.next_idx == self.buffer.len() {
+        if self.next_idx == mask.len() {
             // No bytes left
             return None;
         }
 
         // Mutate
-        self.orig_byte = self.buffer[self.next_idx];
-        self.buffer[self.next_idx] ^= 0xff;
+        self.orig_byte = mask[self.next_idx];
+        mask[self.next_idx] ^= 0xff;
         self.last_idx = Some(self.next_idx);
 
         self.next_idx += 1;
@@ -315,7 +330,7 @@ impl Iterator for FlipByte<'_> {
 impl Drop for FlipByte<'_> {
     fn drop(&mut self) {
         if let Some(idx) = self.last_idx.take() {
-            self.buffer[idx] = self.orig_byte;
+            self.mce.borrow().get_msk_as_slice()[idx] = self.orig_byte;
         }
     }
 }
@@ -323,7 +338,7 @@ impl Drop for FlipByte<'_> {
 /// A Mutator  that consecutively flips each bit.
 pub struct FlipBit<'a> {
     /// The buffer we are mutating.
-    buffer: &'a mut [u8],
+    mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
     /// Size of `buffer` in bits.
     size_in_bits: usize,
     /// Index of the next bit that is mutated.
@@ -336,11 +351,11 @@ pub struct FlipBit<'a> {
 
 impl FlipBit<'_> {
     #[allow(unused)]
-    pub fn new(buffer: &mut [u8]) -> FlipBit {
-        let size_in_bits = buffer.len() * 8;
+    pub fn new(mce: Rc<RefCell<&mut MutationCacheEntry>>) -> FlipBit {
+        let size_in_bits = mce.borrow().get_msk_as_slice().len() * 8;
 
         FlipBit {
-            buffer,
+            mce,
             next_bit: 0,
             size_in_bits,
             last_byte_idx: None,
@@ -356,12 +371,12 @@ impl fmt::Debug for FlipBit<'_> {
             .field("next_bit", &self.next_bit)
             .field("last_byte_idx", &self.last_byte_idx)
             .field("last_byte_orig_value", &self.last_byte_orig_value)
-            .field("buffer.len()", &self.buffer.len())
+            .field("buffer.len()", &self.mce.borrow().get_msk_as_slice().len())
             .finish_non_exhaustive()
     }
 }
 
-impl Mutator for FlipBit<'_> {
+impl<'a> Mutator<'a> for FlipBit<'a> {
     fn steps_total(&self) -> usize {
         self.size_in_bits
     }
@@ -373,15 +388,21 @@ impl Mutator for FlipBit<'_> {
     fn mutator_type(&self) -> MutatorType {
         MutatorType::FlipBit
     }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        self.mce.clone()
+    }
 }
 
 impl Iterator for FlipBit<'_> {
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mce = self.mce.borrow();
+        let mask = mce.get_msk_as_slice();
         // Revert previous mutation.
         if let Some(idx) = self.last_byte_idx.take() {
-            self.buffer[idx] = self.last_byte_orig_value;
+            mask[idx] = self.last_byte_orig_value;
         }
 
         if self.next_bit == self.size_in_bits {
@@ -390,11 +411,11 @@ impl Iterator for FlipBit<'_> {
         }
 
         // Store original value.
-        self.last_byte_orig_value = self.buffer[self.next_bit / 8];
+        self.last_byte_orig_value = mask[self.next_bit / 8];
         self.last_byte_idx = Some(self.next_bit / 8);
 
         // Mutate
-        self.buffer[self.next_bit / 8] ^= 1 << (self.next_bit % 8);
+        mask[self.next_bit / 8] ^= 1 << (self.next_bit % 8);
 
         self.next_bit += 1;
 
@@ -405,7 +426,7 @@ impl Iterator for FlipBit<'_> {
 impl Drop for FlipBit<'_> {
     fn drop(&mut self) {
         if let Some(idx) = self.last_byte_idx.take() {
-            self.buffer[idx] = self.last_byte_orig_value;
+            self.mce.borrow().get_msk_as_slice()[idx] = self.last_byte_orig_value;
         }
     }
 }
@@ -413,7 +434,7 @@ impl Drop for FlipBit<'_> {
 /// A Mutator  that consecutively flips each bit.
 pub struct U8Counter<'a> {
     /// The buffer we are mutating.
-    buffer: &'a mut [u8],
+    mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
     next_byte: usize,
     /// Index of the last byte we mutated.
     last_byte_idx: Option<usize>,
@@ -424,11 +445,11 @@ pub struct U8Counter<'a> {
 
 impl U8Counter<'_> {
     #[allow(unused)]
-    pub fn new(buffer: &mut [u8]) -> U8Counter {
-        let size_in_bits = buffer.len() * 8;
+    pub fn new(mce: Rc<RefCell<&mut MutationCacheEntry>>) -> U8Counter {
+        let size_in_bits = mce.borrow().get_msk_as_slice().len() * 8;
 
         U8Counter {
-            buffer,
+            mce,
             next_byte: 0,
             last_byte_idx: None,
             last_byte_orig_value: 0,
@@ -444,14 +465,14 @@ impl fmt::Debug for U8Counter<'_> {
             .field("last_byte_idx", &self.last_byte_idx)
             .field("last_byte_orig_value", &self.last_byte_orig_value)
             .field("ctr", &self.ctr)
-            .field("buffer.len()", &self.buffer.len())
+            .field("buffer.len()", &self.mce.borrow().get_msk_as_slice().len())
             .finish_non_exhaustive()
     }
 }
 
-impl Mutator for U8Counter<'_> {
+impl<'a> Mutator<'a> for U8Counter<'a> {
     fn steps_total(&self) -> usize {
-        self.buffer.len() * 2usize.pow(8)
+        self.mce.borrow().get_msk_as_slice().len() * 2usize.pow(8)
     }
 
     fn steps_done(&self) -> usize {
@@ -461,27 +482,33 @@ impl Mutator for U8Counter<'_> {
     fn mutator_type(&self) -> MutatorType {
         MutatorType::U8Counter
     }
+
+      fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        self.mce.clone()
+    }
 }
 
 impl Iterator for U8Counter<'_> {
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mce = self.mce.borrow();
+        let mask = mce.get_msk_as_slice();
         // Revert previous mutation.
         if let Some(idx) = self.last_byte_idx.take() {
-            self.buffer[idx] = self.last_byte_orig_value;
+            mask[idx] = self.last_byte_orig_value;
         }
 
-        if self.next_byte == self.buffer.len() {
+        if self.next_byte == mask.len() {
             return None;
         }
 
         // Store original value.
-        self.last_byte_orig_value = self.buffer[self.next_byte];
+        self.last_byte_orig_value = mask[self.next_byte];
         self.last_byte_idx = Some(self.next_byte);
 
         // Mutate
-        self.buffer[self.next_byte] ^= self.ctr;
+        mask[self.next_byte] ^= self.ctr;
         match self.ctr.checked_add(1) {
             Some(v) => self.ctr = v,
             _ => {
@@ -497,7 +524,7 @@ impl Iterator for U8Counter<'_> {
 impl Drop for U8Counter<'_> {
     fn drop(&mut self) {
         if let Some(idx) = self.last_byte_idx.take() {
-            self.buffer[idx] = self.last_byte_orig_value;
+            self.mce.borrow().get_msk_as_slice()[idx] = self.last_byte_orig_value;
         }
     }
 }
@@ -528,7 +555,7 @@ const INTERESTING_VALUES: [u8; 4] = [0x80, 0x1, 0x0, 0x2];
 /// until `max_steps` steps have been performed
 pub struct Havoc<'a> {
     /// The buffer we are mutating.
-    buffer: &'a mut [u8],
+    mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
     /// Original buffer value
     orig_buffer: Vec<u8>,
     steps_done: usize,
@@ -541,14 +568,18 @@ pub struct Havoc<'a> {
 
 impl Havoc<'_> {
     #[allow(unused)]
-    pub fn new(buffer: &mut [u8], max_stacks: usize, repetitions: usize) -> Havoc {
+    pub fn new(
+        mce: Rc<RefCell<&mut MutationCacheEntry>>,
+        max_stacks: usize,
+        repetitions: usize,
+    ) -> Havoc {
         // save un-mutated buffer
         // TODO: replace Vec?
-        let mut orig_buffer: Vec<u8> = vec![0; buffer.len()];
-        orig_buffer.copy_from_slice(buffer);
+        let mut orig_buffer: Vec<u8> = vec![0; mce.borrow().get_msk_as_slice().len()];
+        orig_buffer.copy_from_slice(mce.borrow().get_msk_as_slice());
         let steps_total = max_stacks * repetitions;
         Havoc {
-            buffer,
+            mce,
             orig_buffer,
             steps_done: 0,
             steps_total,
@@ -565,12 +596,12 @@ impl fmt::Debug for Havoc<'_> {
             .field("max_stacks", &self.max_stacks)
             .field("repetitions", &self.repetitions)
             .field("orig_buffer.len()", &self.orig_buffer.len())
-            .field("buffer.len()", &self.buffer.len())
+            .field("buffer.len()", &self.mce.borrow().get_msk_as_slice().len())
             .finish_non_exhaustive()
     }
 }
 
-impl Mutator for Havoc<'_> {
+impl<'a> Mutator<'a> for Havoc<'a> {
     fn steps_total(&self) -> usize {
         self.steps_total
     }
@@ -582,20 +613,26 @@ impl Mutator for Havoc<'_> {
     fn mutator_type(&self) -> MutatorType {
         MutatorType::Havoc
     }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        self.mce.clone()
+    }
 }
 
 impl Iterator for Havoc<'_> {
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mce = self.mce.borrow();
+        let mask = mce.get_msk_as_slice();
         // check if we exhausted the iterator
         if self.steps_done == self.steps_total() {
-            self.buffer.copy_from_slice(&self.orig_buffer);
+            mask.copy_from_slice(&self.orig_buffer);
             return None;
         }
         // revert previous mutations
         if self.steps_done > 0 && self.steps_done % self.max_stacks == 0 {
-            self.buffer.copy_from_slice(&self.orig_buffer);
+            mask.copy_from_slice(&self.orig_buffer);
         }
         // choose random mutation, apply & yield
         let mut rng = rand::thread_rng();
@@ -604,19 +641,19 @@ impl Iterator for Havoc<'_> {
 
         match mutation_choice.into() {
             HavocMutationType::FlipBit => {
-                let idx = (random_idx / 8) % self.buffer.len();
-                self.buffer[idx] ^= 1 << (random_idx % 8);
+                let idx = (random_idx / 8) % mask.len();
+                mask[idx] ^= 1 << (random_idx % 8);
             }
             HavocMutationType::FlipByte => {
-                self.buffer[random_idx % self.buffer.len()] ^= 0xff;
+                mask[random_idx % mask.len()] ^= 0xff;
             }
             HavocMutationType::RandomByte => {
-                self.buffer[random_idx % self.buffer.len()] = rng.gen::<u8>();
+                mask[random_idx % mask.len()] = rng.gen::<u8>();
             }
             HavocMutationType::InterestingValue => {
                 // TODO: optimize this: only replace first/last byte?
                 let idx = random_idx % INTERESTING_VALUES.len();
-                for b in self.buffer.iter_mut() {
+                for b in mask.iter_mut() {
                     *b = INTERESTING_VALUES[idx];
                 }
             }
@@ -629,7 +666,10 @@ impl Iterator for Havoc<'_> {
 
 impl Drop for Havoc<'_> {
     fn drop(&mut self) {
-        self.buffer.copy_from_slice(&self.orig_buffer);
+        self.mce
+            .borrow()
+            .get_msk_as_slice()
+            .copy_from_slice(&self.orig_buffer);
     }
 }
 
@@ -658,7 +698,7 @@ impl fmt::Debug for Nop {
     }
 }
 
-impl Mutator for Nop {
+impl<'a> Mutator<'a> for Nop {
     fn steps_total(&self) -> usize {
         self.steps
     }
@@ -669,6 +709,10 @@ impl Mutator for Nop {
 
     fn mutator_type(&self) -> MutatorType {
         MutatorType::Nop
+    }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        unimplemented!()
     }
 }
 
@@ -690,21 +734,25 @@ pub struct CombineMutator<'a> {
     steps: usize,
     steps_done: usize,
     msks: Vec<Arc<[u8]>>,
-    buffer: &'a mut [u8],
+    mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
     buffer_original: Box<[u8]>,
     one_shot: bool,
 }
 
 impl CombineMutator<'_> {
     #[allow(unused)]
-    pub fn new(buffer: &mut [u8], msks: Vec<Arc<[u8]>>, one_shot: bool) -> CombineMutator {
-        let buffer_original = buffer.to_vec().into_boxed_slice();
+    pub fn new(
+        mce: Rc<RefCell<&mut MutationCacheEntry>>,
+        msks: Vec<Arc<[u8]>>,
+        one_shot: bool,
+    ) -> CombineMutator {
+        let buffer_original = mce.borrow().get_msk_as_slice().to_vec().into_boxed_slice();
 
         CombineMutator {
             steps: msks.len(),
             msks,
             steps_done: 0,
-            buffer,
+            mce,
             buffer_original,
             one_shot,
         }
@@ -721,7 +769,7 @@ impl fmt::Debug for CombineMutator<'_> {
     }
 }
 
-impl Mutator for CombineMutator<'_> {
+impl<'a> Mutator<'a> for CombineMutator<'a> {
     fn steps_total(&self) -> usize {
         self.steps
     }
@@ -741,18 +789,24 @@ impl Mutator for CombineMutator<'_> {
     fn needs_sync(&self) -> bool {
         true
     }
+
+    fn target(&self) -> Rc<RefCell<&'a mut MutationCacheEntry>> {
+        self.mce.clone()
+    }
 }
 
 impl Iterator for CombineMutator<'_> {
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mce = self.mce.borrow();
+        let mask = mce.get_msk_as_slice();
         if let Some(msk) = self.msks.pop() {
             self.steps_done += 1;
             // The msk buffer might be smaller then ours, thus we return the original value.
-            self.buffer.copy_from_slice(&self.buffer_original[..]);
-            let copy_len = cmp::min(self.buffer.len(), msk.len());
-            self.buffer[0..copy_len].copy_from_slice(&msk[0..copy_len]);
+            mask.copy_from_slice(&self.buffer_original[..]);
+            let copy_len = cmp::min(mask.len(), msk.len());
+            mask[0..copy_len].copy_from_slice(&msk[0..copy_len]);
             Some(())
         } else {
             None
@@ -762,7 +816,10 @@ impl Iterator for CombineMutator<'_> {
 
 impl Drop for CombineMutator<'_> {
     fn drop(&mut self) {
-        self.buffer.copy_from_slice(&self.buffer_original[..]);
+        self.mce
+            .borrow()
+            .get_msk_as_slice()
+            .copy_from_slice(&self.buffer_original[..]);
     }
 }
 

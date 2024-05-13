@@ -12,6 +12,7 @@ use crate::{
     source,
 };
 use anyhow::Result;
+use chrono::Local;
 use nix::sys::signal::Signal;
 
 impl FuzzingWorker {
@@ -135,7 +136,7 @@ impl FuzzingWorker {
                 }
                 BitmapStatus::NoChange => return Ok(()),
             }
-            stats.last_finding_ts = Some(Instant::now());
+            stats.last_finding_dt = Some(Instant::now());
             self.maybe_save_interesting_input(sink_input);
             self.create_new_queue_entry(has_new_bits)?;
         }
@@ -162,12 +163,12 @@ impl FuzzingWorker {
         match new_bits {
             BitmapStatus::NewEdge => {
                 stats.sink_unique_crashes += 1;
-                stats.last_crash_ts = Some(Instant::now());
+                stats.last_crash_dt = Some(Instant::now());
                 self.save_crashing_input(sink_input, signal);
             }
             BitmapStatus::NewHit => {
                 stats.sink_unique_crashes += 1;
-                stats.last_crash_ts = Some(Instant::now());
+                stats.last_crash_dt = Some(Instant::now());
                 self.save_crashing_input(sink_input, signal);
             }
             BitmapStatus::NoChange => (),

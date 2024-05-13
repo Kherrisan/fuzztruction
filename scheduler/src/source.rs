@@ -42,10 +42,7 @@ use std::io;
 use std::{convert::TryFrom, ffi::CString};
 use std::{fs::OpenOptions, io::prelude::*};
 
-use log::{
-    error,
-    kv::{ToKey, ToValue},
-};
+use log::{error, kv::ToKey};
 
 use lazy_static::lazy_static;
 use libc::{self};
@@ -66,8 +63,12 @@ use crate::io_channels::*;
 const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(not(feature = "never-timeout"))]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_SIZE: u64 = n_mib_bytes!(1) as u64;
+
+#[cfg(feature = "never-timeout")]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3600 * 24);
 
 lazy_static! {
     /// Mapping of (binary path, Child PID) to patch point collection if they
@@ -97,7 +98,7 @@ pub enum SourceError {
 }
 
 /// Result of one run of the target application.
-#[derive()]
+#[derive(Clone)]
 pub enum RunResult {
     /// The target terminated gracefully.
     Terminated {
@@ -197,6 +198,8 @@ pub struct Source {
     pub mq_recv: Option<PosixMq>,
     /// The PID of the target's parent (source agent).
     pid: Option<i32>,
+    child_pid: Option<i32>,
+    timeout_signal: Arc<RwLock<bool>>,
     mem_file: Option<File>,
     log_stdout: bool,
     log_stderr: bool,
@@ -242,7 +245,7 @@ impl Source {
 
         let mut rand_suffix: String = thread_rng()
             .sample_iter(&Alphanumeric)
-            .take(30)
+            .take(6)
             .map(char::from)
             .collect();
         rand_suffix += &format!("_tid_{}", unsafe { libc::gettid().to_string() });
@@ -463,6 +466,8 @@ impl Source {
             mq_send: None,
             mq_recv: None,
             pid: None,
+            child_pid: None,
+            timeout_signal: Default::default(),
             mem_file: None,
             log_stdout,
             log_stderr,
@@ -501,6 +506,17 @@ impl Source {
             .context(output)?;
         }
         Ok(())
+    }
+
+    pub fn build(
+        config: &Config,
+        id: Option<usize>,
+        timeout_signal: Arc<RwLock<bool>>,
+    ) -> Result<Source> {
+        let mut source = Source::from_config(config, id)?;
+        source.timeout_signal = timeout_signal;
+
+        Ok(source)
     }
 
     pub fn from_config(config: &Config, id: Option<usize>) -> Result<Source> {
@@ -544,7 +560,7 @@ impl Source {
 
         let child_pid;
         unsafe {
-            log::debug!("Forking child");
+            log::debug!("Forking source child");
             child_pid = libc::fork();
 
             match child_pid {
@@ -669,13 +685,13 @@ impl Source {
                         libc::close(fd);
                     }
 
-                    // if self.log_stderr {
-                    //     // let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
-                    //     // libc::dup2(fd, libc::STDERR_FILENO);
-                    //     // libc::close(fd);
-                    // } else {
-                    //     libc::dup2(dev_null_fd, libc::STDERR_FILENO);
-                    // }
+                    if self.log_stderr {
+                        let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
+                        libc::dup2(fd, libc::STDERR_FILENO);
+                        libc::close(fd);
+                    } else {
+                        libc::dup2(dev_null_fd, libc::STDERR_FILENO);
+                    }
 
                     libc::close(dev_null_fd);
                     libc::close(self.output_file.0.as_raw_fd());
@@ -1236,10 +1252,11 @@ impl Source {
             .take()
             .unwrap_or_else(|| unsafe { libc::gettid() })
             .to_string();
-        let time = record
-            .time
-            .take()
-            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+        let time = record.time.take().unwrap_or_else(|| {
+            chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        });
         let kvs = [
             ("log_source".to_key(), msg_source.as_str()),
             ("tid".to_key(), tid.as_str()),
@@ -1287,23 +1304,20 @@ impl Source {
         Ok(())
     }
 
-    /// Execute the target and report the execution result.
-    ///
-    /// # Errors
-    /// All returned errors must be considered as unrecoverable fatal error.
-    pub fn run(&mut self, timeout: Duration) -> Result<RunResult> {
-        if cfg!(debug) && self.input_file.0.stream_len().unwrap() == 0 {
-            log::warn!("Running without input! Is this intentional?");
-        }
+    pub fn fork(&mut self) -> Result<()> {
+        // The timeout_ms field in the RunMessage is unused
+        // by the agent, so we use default()
+        let run_msg = RunMessage::from_millis(Default::default());
 
-        // Make sure we do not create huge output files because nobody calls read().
-        self.truncate_stdout_output();
-
-        let run_msg = RunMessage::from_millis(timeout.as_millis() as u32);
         let mq_send = self
             .mq_send
             .as_ref()
             .expect("start() must be called first!");
+        // Request run
+        mq_send
+            .send_timeout(0, run_msg.to_bytes(), DEFAULT_SEND_TIMEOUT)
+            .context("Failed to send RunMessage")?;
+
         let mq_recv = self
             .mq_recv
             .as_ref()
@@ -1312,54 +1326,70 @@ impl Source {
         // Scratch buffer.
         let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
 
-        // Vector used to store messages that preceded the termination message.
-        let mut msgs: Vec<ReceivableMessages> = Vec::new();
-
-        // Request run
-        mq_send
-            .send_timeout(0, run_msg.to_bytes(), DEFAULT_SEND_TIMEOUT)
-            .context("Failed to send RunMessage")?;
-
         // Retrive child sid thus we can kill the forked child if it is unresponsive.
-        log::trace!("Waiting for the child sid");
+        log::trace!("Waiting for source child sid");
         self.receive_message(DEFAULT_RECEIVE_TIMEOUT, &mut buf)
-            .context("Failed to receive child pid")?;
+            .context("Failed to receive source child pid")?;
         let pid_msg = ChildPid::try_from_bytes(&buf)?;
-        log::trace!("Got child sid: {}", pid_msg.pid);
+        self.child_pid = Some(pid_msg.pid as i32);
+
+        log::trace!("Got child sid: {}", self.child_pid.unwrap());
+
+        Ok(())
+    }
+
+    /// Execute the target and report the execution result.
+    ///
+    /// # Errors
+    /// All returned errors must be considered as unrecoverable fatal error.
+    pub fn run(&mut self, timeout: Duration) -> Result<RunResult> {
+        log::debug!("Launch source message loop");
+        let mut msgs = vec![];
+        let mut buf: Vec<u8> = vec![0; self.mq_recv.as_ref().unwrap().attributes().max_msg_len];
+
+        let mut mq_timeout = false;
+        let mut kill_child_ret = Ok(());
 
         // Wait for reply
         loop {
+            let signal_timeout = self
+                .timeout_signal
+                .read()
+                .expect("Failed to get read lock of the timeout_signal rwlock");
+            if *signal_timeout && !mq_timeout {
+                mq_timeout = true;
+                log::trace!("Due to timeout_signal, manually killing the child.");
+                let pid_msg = ChildPid::new(self.child_pid.unwrap() as u64);
+                kill_child_ret = kill_child_process_group(&pid_msg);
+            }
+            drop(signal_timeout);
             // Get the next message
             match self.receive_message(timeout, &mut buf) {
                 Ok(_) => (),
-                Err(_) => {
-                    // The child did not terminated in time
-                    // => kill it and consume the resulting terminated message.
-                    log::trace!(
-                        "Did not receive any response in time. Manually killing the child."
-                    );
-                    let kill_child_ret = kill_child_process_group(&pid_msg);
-
-                    // Consume the TerminatedMessage that might be caused by our
-                    // killpg() call, or, if the child won the race be the actual
-                    // TerminatedMessage (in other words, we misinterpreted this as a timeout).
-                    // Anyways, there should be exactly one TerminatedMessage message. If not,
-                    // then this is a fatal error since the agents state becomes unknown.
-                    log::trace!("Waiting for termination acknowledgment.");
-                    let msg = self.wait_for_message::<TerminatedMessage>(DEFAULT_RECEIVE_TIMEOUT);
-                    if let Err(err) = msg {
+                Err(err) => {
+                    if !mq_timeout {
+                        mq_timeout = true;
+                        // The child did not terminated in time
+                        log::trace!(
+                            "Did not receive any response in time. Manually killing the child."
+                        );
+                        let pid_msg = ChildPid::new(self.child_pid.unwrap() as u64);
+                        kill_child_ret = kill_child_process_group(&pid_msg);
+                        continue;
+                    } else {
+                        // We have killpg the source, but have not received the TerminatedMessage yet.
+                        // This is a fatal error, since the state of the agent is unknown.
                         log::error!(
                             "The agent failed to acknowledge our termination request. err={}, child_pid={}, kill_child_ret={:?}",
-                            err, pid_msg.pid, kill_child_ret
+                            err, self.child_pid.unwrap(), kill_child_ret
                         );
                         return Err(err.context("Expected TerminatedMessage after issuing killpg"));
                     }
-
-                    return Ok(RunResult::TimedOut { msgs });
                 }
             }
 
             let header = MsgHeader::try_from_bytes(&buf)?;
+
             match header.id {
                 MessageType::MsgIdTracePointStat => {
                     log::trace!("Got MsgIdTracePointStat message");
@@ -1371,7 +1401,10 @@ impl Source {
                     let msg = TerminatedMessage::try_from_bytes(&buf)?;
                     let exit_code = msg.exit_code;
                     log::trace!("Received MsgIdTerminated message.");
-                    if exit_code >= 0 {
+                    if mq_timeout {
+                        log::trace!("Child was killed by us, acknowledgement received");
+                        return Ok(RunResult::TimedOut { msgs });
+                    } else if exit_code >= 0 {
                         log::trace!("Child terminated");
                         return Ok(RunResult::Terminated { exit_code, msgs });
                     } else {
@@ -1388,7 +1421,7 @@ impl Source {
                     log::error!("{}", err_msg);
                     return Err(anyhow!(err_msg).context("Error while processing received message"));
                 }
-            }
+            };
         }
     }
 

@@ -1,4 +1,9 @@
-use std::{convert::TryInto, fs::{OpenOptions, self}, ops::Range, path::Path};
+use std::{
+    convert::TryInto,
+    fs::{self, OpenOptions},
+    ops::Range,
+    path::Path,
+};
 
 use fuzztruction_shared::{
     constants::PATCH_POINT_SIZE, mutation_cache::MutationCacheEntryFlags,
@@ -117,7 +122,11 @@ impl PatchPoint {
     }
 }
 
-pub fn from_stackmap(map: &StackMap, mapping: &MapRange, elf_file: &elf::ElfBytes<elf::endian::AnyEndian>) -> Vec<PatchPoint> {
+pub fn from_stackmap(
+    map: &StackMap,
+    mapping: &MapRange,
+    elf_file: &elf::ElfBytes<elf::endian::AnyEndian>,
+) -> Vec<PatchPoint> {
     let mut idx: usize = 0;
     let mut patch_points = Vec::new();
 

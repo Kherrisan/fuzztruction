@@ -2,7 +2,7 @@ mod types;
 pub use types::FuzzingPhase;
 
 mod run_common;
-mod run_phase;
+pub mod run_phase;
 //phases
 mod add;
 mod combine;

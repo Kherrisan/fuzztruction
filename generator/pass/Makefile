@@ -1,5 +1,5 @@
 #We only support clang, so we fix this variable!
-BASE = /usr
+BASE = /home/ubuntu/llvm-ft/build
 CC = $(BASE)/bin/clang
 CXX = $(BASE)/bin/clang++
 AR = $(BASE)/bin/llvm-ar

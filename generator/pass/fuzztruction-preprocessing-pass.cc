@@ -40,7 +40,7 @@ bool FuzztructionSourcePreprocesssingPass::replaceMemFunctions(Module &M) {
     LLVMContext &context = M.getContext();
 
     dbgs() << "LLVMContext.shouldDiscardValueNames():" << context.shouldDiscardValueNames() << "\n" ;
-    context.setDiscardValueNames(false);
+    // context.setDiscardValueNames(false);
     dbgs() << "LLVMContext.shouldDiscardValueNames():" << context.shouldDiscardValueNames() << "\n" ;
 
     // FIXME: this path should not be absolute.

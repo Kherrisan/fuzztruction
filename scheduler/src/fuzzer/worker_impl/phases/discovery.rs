@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use fuzztruction_shared::{
     mutation_cache::MutationCache, mutation_cache_entry::MutationCacheEntry,
@@ -88,24 +88,22 @@ impl FuzzingWorker {
         candidates.shuffle(&mut rand::thread_rng());
 
         // Create mutators
-        let mut mutations = Vec::<(
-            &mut MutationCacheEntry,
-            Vec<Box<dyn mutators::Mutator<Item = ()>>>,
-        )>::new();
+        let mut mutations = vec![];
 
         for candidate in candidates.into_iter() {
             let mut mutators = Vec::new();
+            let candidate = Rc::new(RefCell::new(candidate));
 
-            let mutator = mutators::FlipByte::new(candidate.get_msk_as_slice());
+            let mutator = mutators::FlipByte::new(candidate.clone());
             mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
 
-            let u8_mutator = mutators::U8Counter::new(candidate.get_msk_as_slice());
+            let u8_mutator = mutators::U8Counter::new(candidate.clone());
             if u8_mutator.estimate_runtime(self.state.entry().as_ref().avg_exec_duration_raw())
                 < Duration::from_secs(1)
             {
                 mutators.push(Box::new(u8_mutator) as Box<dyn mutators::Mutator<Item = ()>>);
             } else {
-                let mutator = mutators::FlipBit::new(candidate.get_msk_as_slice());
+                let mutator = mutators::FlipBit::new(candidate.clone());
                 if mutator.estimate_runtime(self.state.entry().as_ref().avg_exec_duration_raw())
                     < Duration::from_secs(1)
                 {
@@ -113,8 +111,8 @@ impl FuzzingWorker {
                 }
             }
 
-            let entry = (unsafe { candidate.alias_mut() }, mutators);
-            mutations.push(entry);
+            // let entry = (unsafe { candidate.borrow().alias_mut() }, mutators);
+            mutations.push((candidate, mutators));
         }
 
         let batch_cov_timeout = self.config.phases.discovery.batch_cov_timeout;

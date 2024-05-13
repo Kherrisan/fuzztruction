@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+#[derive(Debug)]
 pub struct CerebrumQuery<'a> {
     cerebrum: &'a Cerebrum,
 }

@@ -689,7 +689,7 @@ impl<'a> Jit<'a> {
         mce: &MutationCacheEntry,
         is_callee: bool,
     ) -> Result<FunctionTemplate, JitError> {
-        //log::trace!("gen_mutation_indirect_gpr: {:#?}", mce);
+        // log::trace!("gen_mutation_indirect_gpr: {:#?}", mce);
         let mut asm = Vec::<String>::new();
 
         if mce.loc_size() > 8 && mce.loc_size() != 16 {

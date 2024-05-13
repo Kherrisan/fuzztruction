@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::{
     fuzzer::{worker::FuzzingWorker, worker_impl::mutators},
@@ -64,10 +64,7 @@ impl FuzzingWorker {
         let mut entries = source.mutation_cache().borrow_mut().entries_mut_static();
         entries.shuffle(&mut thread_rng());
 
-        let mut mutations = Vec::<(
-            &mut MutationCacheEntry,
-            Vec<Box<dyn mutators::Mutator<Item = ()>>>,
-        )>::new();
+        let mut mutations = vec![];
 
         for entry in entries {
             let msks = if let Some(msks) = mce_to_msks.remove(&entry.id()) {
@@ -82,13 +79,12 @@ impl FuzzingWorker {
             }
 
             let mut mutators = Vec::new();
+            let entry = Rc::new(RefCell::new(entry));
 
-            let mutator =
-                mutators::CombineMutator::new(entry.get_msk_as_slice(), msks, entry.is_nop());
+            let mutator = mutators::CombineMutator::new(entry.clone(), msks, entry.borrow().is_nop());
             mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
 
-            let entry = (unsafe { entry.alias_mut() }, mutators);
-            mutations.push(entry);
+            mutations.push((entry, mutators));
         }
 
         // source.mutation_cache_replace(&new_mc)?;

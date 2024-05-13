@@ -20,7 +20,9 @@ pub fn setup_logger(level: log::Level) -> Result<(), fern::InitError> {
 /// Passes the given log Record to the coordinator via the POSIX queue.
 /// This allows us to configure logging realted things at a single location.
 pub fn log_to_posix_mq(record: &Record) {
-    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let time = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string();
     let tid = unsafe { libc::gettid() };
     let kvs = [
         ("log_source", "source".to_value()),

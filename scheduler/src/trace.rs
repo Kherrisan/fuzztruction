@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use fuzztruction_shared::{messages::TracePointStat, types::PatchPointID};
+use fuzztruction_shared::{messages::TracePointStat, tracing::TraceEntry, types::PatchPointID};
 use serde::{Deserialize, Serialize};
 
 #[allow(unused)]
@@ -15,28 +15,39 @@ pub struct Trace {
 }
 
 impl Trace {
-    pub fn from_trace_point_stats(msgs: &[&TracePointStat]) -> Trace {
+    pub fn from_trace_entries(msgs: &[TraceEntry<u64>]) -> Trace {
         let mut exec_cnt = HashMap::new();
         let mut exec_order = HashMap::new();
 
         msgs.iter().for_each(|e| {
-            if e.cnt > TRACE_EXEC_CNT_LIMIT {
-                log::trace!("Skipping PatchPoint {:?} since it has a pretty high exec cnt: {:#?}", e.patch_point_id, e);
+            if e.hits > TRACE_EXEC_CNT_LIMIT {
+                log::trace!(
+                    "Skipping PatchPoint {:?} since it has a pretty high exec cnt: {}",
+                    e.value,
+                    e.hits
+                );
                 return;
             }
-            if e.execution_index.is_none() {
-                log::trace!("Skipping PatchPoint {:?} since it was executed but does not have an exec idx: {:#?}", e.patch_point_id, e);
+            if e.order.is_none() {
+                log::trace!(
+                    "Skipping PatchPoint {:?} since it was executed but does not have an exec idx",
+                    e.value
+                );
                 return;
             }
 
-            exec_cnt.insert(e.patch_point_id, e.cnt);
-            exec_order.insert(e.patch_point_id, e.execution_index.unwrap().get());
+            exec_cnt.insert(PatchPointID(e.value), e.hits);
+            exec_order.insert(PatchPointID(e.value), e.order.unwrap().get());
         });
 
         Trace {
             exec_cnt,
             exec_order,
         }
+    }
+
+    pub fn from_trace_point_stats(_msgs: &[&TracePointStat]) -> Trace {
+        unimplemented!()
     }
 
     pub fn is_covered(&self, pp: PatchPointID) -> bool {

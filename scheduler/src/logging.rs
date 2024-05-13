@@ -28,12 +28,17 @@ pub fn setup_logger(log_path: &Path, log_level: &str) -> Result<()> {
                 .info(Color::Blue);
             let kvs = record.key_values();
             // println!("{:#?}", kvs.);
-            let time = kvs.get("time".to_key()).map_or(chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(), |v| {
-                v.to_borrowed_str().unwrap().to_owned()
-            });
-            let tid = kvs.get("tid".to_key()).map_or(unsafe { libc::gettid() }.to_string(), |v| {
-                v.to_borrowed_str().unwrap().to_owned()
-            });
+            let time = kvs.get("time".to_key()).map_or(
+                chrono::Local::now()
+                    .format("%Y-%m-%d %H:%M:%S%.3f")
+                    .to_string(),
+                |v| v.to_borrowed_str().unwrap().to_owned(),
+            );
+            let tid = kvs
+                .get("tid".to_key())
+                .map_or(unsafe { libc::gettid() }.to_string(), |v| {
+                    v.to_borrowed_str().unwrap().to_owned()
+                });
             let log_source = kvs
                 .get("log_source".to_key())
                 .map(|s| s.to_borrowed_str().unwrap().to_owned())
@@ -43,9 +48,9 @@ pub fn setup_logger(log_path: &Path, log_level: &str) -> Result<()> {
                 "{} [{}][{}][{}][{}:{}][{}] {}",
                 time,
                 match log_source.as_str() {
-                    "source" => "source".green(),
-                    "sink" => "sink".cyan(),
-                    _ => log_source.as_str().magenta(),
+                    "source" => "source".green().bold(),
+                    "sink" => "sink".cyan().bold(),
+                    _ => log_source.as_str().magenta().bold(),
                 },
                 tid,
                 record.target().split("::").next().unwrap_or("?"),

@@ -1,9 +1,12 @@
 use std::{
+    cell::RefCell,
     intrinsics::unlikely,
     ops::ControlFlow,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
+use chrono::Local;
 use fuzztruction_shared::mutation_cache_entry::MutationCacheEntry;
 
 use crate::{
@@ -33,7 +36,7 @@ impl FuzzingWorker {
     pub fn fuzz_candidates(
         &mut self,
         mutations: Vec<(
-            &mut MutationCacheEntry,
+            Rc<RefCell<&mut MutationCacheEntry>>,
             Vec<Box<dyn mutators::Mutator<Item = ()>>>,
         )>,
         iteration_no_new_coverage_timeout: Option<Duration>,
@@ -61,6 +64,7 @@ impl FuzzingWorker {
 
         let mut estimated_runtime = Duration::from_secs(0);
         let mut iteration_total_execs_required = 0;
+        // for (_, mutators) in mutations.iter() {
         for (_, mutators) in mutations.iter() {
             mutators.iter().for_each(|m| {
                 estimated_runtime += m.estimate_runtime(self.avg_execution_duration);
@@ -80,7 +84,7 @@ impl FuzzingWorker {
 
         // consecutively apply all mutations and check result.
         'exit: for e in mutations {
-            let target_mce = e.0;
+            let target_mce = e.0.borrow();
             let mutators = e.1;
             let is_nop = target_mce.is_nop();
             self.state.set_patch_point(target_mce.id());
@@ -112,7 +116,9 @@ impl FuzzingWorker {
                 let sync_needed = mutator.needs_sync();
 
                 // Enable once for this fuzzing round.
-                one_shot.then(|| target_mce.enable());
+                one_shot.then(|| {
+                    e.0.borrow_mut().enable();
+                });
 
                 if sync_needed {
                     self.source.as_mut().unwrap().sync_mutations()?;
@@ -130,7 +136,9 @@ impl FuzzingWorker {
                     if unlikely(skip_mce_after_first_path)
                         && mce_start_paths_cnt != iteration_stats.paths()
                     {
-                        one_shot.then(|| target_mce.disable());
+                        one_shot.then(|| {
+                            e.0.borrow_mut().disable();
+                        });
                         if sync_needed {
                             self.source.as_mut().unwrap().sync_mutations()?;
                         }
@@ -159,7 +167,9 @@ impl FuzzingWorker {
 
                         last_update_ts = Instant::now();
                         if self.should_stop() {
-                            one_shot.then(|| target_mce.disable());
+                            one_shot.then(|| {
+                                e.0.borrow_mut().disable();
+                            });
                             // No sync check needed since we exit the loop.
                             break 'exit;
                         }
@@ -182,7 +192,9 @@ impl FuzzingWorker {
                     );
                 }
 
-                one_shot.then(|| target_mce.disable());
+                one_shot.then(|| {
+                    e.0.borrow_mut().disable();
+                });
                 if sync_needed {
                     // We need to sync here, since the next entry might not have set sync_needed.
                     self.source.as_mut().unwrap().sync_mutations()?;
@@ -267,17 +279,17 @@ impl FuzzingWorker {
 
 /// Check if we did not found a new path or crash during since `no_new_coverage_timeout` long.
 /// If `no_new_coverage_timeout` is None, `stats.start_ts` is used instead.
-fn check_if_no_new_coverage_timeout_was_exceeded(
+pub fn check_if_no_new_coverage_timeout_was_exceeded(
     no_new_coverage_timeout: Option<Duration>,
     stats: &FuzzerEventCounter,
 ) -> ControlFlow<()> {
     if let Some(no_new_coverage_timeout) = no_new_coverage_timeout {
-        if stats.init_ts.unwrap().elapsed() < no_new_coverage_timeout {
+        let dt = stats.init_dt.unwrap();
+        if dt.elapsed() < no_new_coverage_timeout {
             // If we are not running for `no_new_coverage_timeout` long there is no
             // point of checking whether we found new coverage.
             return ControlFlow::Continue(());
         }
-
         // We are running for `no_new_coverage_timeout` long, check if the last
         // finding happend less than `no_new_coverage_timeout` ago.
         if let Some(time_since_last_path) = stats.time_since_last_new_path_or_crash() {

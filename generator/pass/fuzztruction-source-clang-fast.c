@@ -160,7 +160,7 @@ args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings)
     self->argv[self->argc++] = "-lgenerator_agent";
 
     // Enable debug output.
-    // self->argv[self->argc++] = "-v";
+    self->argv[self->argc++] = "-v";
     self->argv[self->argc] = NULL;
     return self;
 }

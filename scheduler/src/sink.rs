@@ -1,11 +1,31 @@
 use anyhow::{anyhow, Context, Result};
 
 use byte_unit::n_mib_bytes;
+use fuzztruction_shared::aux_messages::AuxStreamMessage;
+use fuzztruction_shared::aux_messages::AuxStreamType;
+use fuzztruction_shared::aux_stream::AuxStreamAssembler;
+use fuzztruction_shared::constants::ENV_LOG_LEVEL;
+use fuzztruction_shared::messages::{Message, MessageType, MsgHeader};
+use fuzztruction_shared::util::current_log_level;
 use fuzztruction_shared::util::try_get_child_exit_reason;
+use libafl::executors::ExitKind;
+use libafl_bolts::shmem::ShMem;
+use libafl_bolts::shmem::ShMemProvider;
+use libafl_bolts::shmem::UnixShMem;
+use libafl_bolts::shmem::UnixShMemProvider;
 use log::error;
+use posixmq::PosixMq;
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 
+use std::env;
 use std::env::set_current_dir;
 use std::os::unix::prelude::AsRawFd;
+use std::sync::Arc;
+use std::sync::RwLock;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 use std::{
     convert::TryFrom,
     ffi::CString,
@@ -14,8 +34,7 @@ use std::{
     ops::*,
     path::PathBuf,
 };
-use std::{fs, io, mem};
-use std::{os::raw::c_char, time::Duration};
+use std::{fs, io};
 use thiserror::Error;
 
 use libc::SIGKILL;
@@ -25,6 +44,7 @@ use nix::sys::signal::Signal;
 use crate::config::Config;
 use crate::io_channels::InputChannel;
 use crate::sink_bitmap::{Bitmap, BITMAP_DEFAULT_MAP_SIZE};
+use crate::source::Source;
 
 use filedescriptor;
 
@@ -37,7 +57,14 @@ const AFL_READ_FROM_PARENT_FD: i32 = FORKSRV_FD;
 const AFL_WRITE_TO_PARENT_FD: i32 = FORKSRV_FD + 1;
 
 const AFL_SHM_ENV_VAR_NAME: &str = "__AFL_SHM_ID";
-const AFL_DEFAULT_TIMEOUT: Duration = Duration::from_millis(10000);
+#[cfg(not(feature = "never-timeout"))]
+const AFL_DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(feature = "never-timeout")]
+const AFL_DEFAULT_TIMEOUT: Duration = Duration::from_secs(3600 * 24);
+#[cfg(not(feature = "never-timeout"))]
+const DEFAULT_SINK_RECEIVE_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(feature = "never-timeout")]
+const DEFAULT_SINK_RECEIVE_TIMEOUT: Duration = Duration::from_secs(3600 * 24);
 
 fn repeat_on_interrupt<F, R>(f: F) -> R
 where
@@ -74,6 +101,18 @@ pub enum RunResult {
     TimedOut,
 }
 
+impl Into<ExitKind> for RunResult {
+    fn into(self) -> ExitKind {
+        match self {
+            RunResult::Terminated(_) => ExitKind::Ok,
+            RunResult::Signalled(_) => ExitKind::Crash,
+            RunResult::TimedOut => ExitKind::Timeout,
+        }
+    }
+}
+
+unsafe impl Send for AflSink {}
+
 #[derive(Debug)]
 pub struct AflSink {
     /// That file system path to the target binary.
@@ -88,23 +127,33 @@ pub struct AflSink {
     /// The file that is used to pass input to the target.
     input_file: (File, PathBuf),
     /// The session id of the forkserver we are communicating with.
-    forkserver_sid: Option<i32>,
+    forkserver_pid: Option<i32>,
     /// The bitmap used to compute coverage.
-    bitmap: Bitmap,
+    afl_map_shm: Option<UnixShMem>,
     /// The fd used to send data to the forkserver.
     send_fd: Option<i32>,
     /// Non blocking fd used to receive data from the forkserver.
     receive_fd: Option<i32>,
+    // The mq used to receive message from the sink forkserver agent.
+    mq_recv: Option<PosixMq>,
+    mq_send: Option<PosixMq>,
+    mq_recv_name: String,
+    mq_send_name: String,
     #[allow(unused)]
     stdout_file: Option<(File, PathBuf)>,
     #[allow(unused)]
     stderr_file: Option<(File, PathBuf)>,
+    // The pid of the sink forked child process.
+    child_pid: Option<i32>,
+    timeout_signal: Arc<RwLock<bool>>,
+    message_loop_handler: Arc<RwLock<bool>>,
     /// Whether to log the output written to stdout. If false, the output is discarded.
     log_stdout: bool,
     /// Whether to log the output written to stderr. If false, the output is discarded.
     log_stderr: bool,
     config: Option<Config>,
     bitmap_was_resize: bool,
+    workdir_file_whitelist: Vec<PathBuf>,
 }
 
 impl AflSink {
@@ -118,6 +167,7 @@ impl AflSink {
         log_stderr: bool,
     ) -> Result<AflSink> {
         workdir.push("sink");
+        let mut workdir_file_whitelist = vec![];
 
         // Create the file into we write inputdata before execution.
         fs::create_dir_all(&workdir)?;
@@ -135,20 +185,33 @@ impl AflSink {
             .truncate(true)
             .open(&input_file_path)?;
 
-        // Replace the @@ marker in the args with the actual file path (if input type is File).
-        if input_channel == InputChannel::File {
-            if let Some(elem) = args.iter_mut().find(|e| **e == "@@") {
-                *elem = input_file_path.to_str().unwrap().to_owned();
-            } else {
-                return Err(anyhow!(format!("No @@ marker in args, even though the input channel is defined as file. args: {:#?}", args)));
+        match input_channel {
+            InputChannel::File => {
+                if let Some(elem) = args.iter_mut().find(|e| **e == "@@") {
+                    *elem = input_file_path.to_str().unwrap().to_owned();
+                } else {
+                    return Err(anyhow!(format!("No @@ marker in args, even though the input channel is defined as file. args: {:#?}", args)));
+                }
             }
+            _ => {}
         }
+
+        let mut rand_suffix: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(6)
+            .map(char::from)
+            .collect();
+        rand_suffix += &format!("_tid_{}", unsafe { libc::gettid().to_string() });
+
+        let mq_recv_name: String = "/mq_sink_recv_".to_owned() + &rand_suffix;
+        let mq_send_name: String = "/mq_sink_send_".to_owned() + &rand_suffix;
 
         let mut stdout_file = None;
         if log_stdout {
             // Setup file for stdout logging.
             let mut path = workdir.clone();
             path.push("stdout");
+            workdir_file_whitelist.push(path.to_owned());
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -164,6 +227,7 @@ impl AflSink {
             // Setup file for stdout logging.
             let mut path = workdir.clone();
             path.push("stderr");
+            workdir_file_whitelist.push(path.to_owned());
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -180,17 +244,41 @@ impl AflSink {
             workdir,
             input_channel,
             input_file: (input_file, input_file_path),
-            forkserver_sid: None,
-            bitmap: Bitmap::new_in_shm(BITMAP_DEFAULT_MAP_SIZE, 0x00),
+            forkserver_pid: None,
+            afl_map_shm: None,
             send_fd: None,
             receive_fd: None,
+            mq_recv: None,
+            mq_send: None,
+            mq_recv_name,
+            mq_send_name,
             log_stdout,
             log_stderr,
+            child_pid: None,
+            timeout_signal: Default::default(),
+            message_loop_handler: Arc::new(RwLock::new(true)),
             stdout_file,
             stderr_file,
             config: config.cloned(),
             bitmap_was_resize: false,
+            workdir_file_whitelist,
         })
+    }
+
+    pub fn build(
+        config: &Config,
+        id: Option<usize>,
+        shmem_provider: &mut UnixShMemProvider,
+        timeout_signal: Arc<RwLock<bool>>,
+    ) -> Result<AflSink> {
+        let mut sink = AflSink::from_config(config, id)?;
+
+        let shmem = shmem_provider.new_shmem(BITMAP_DEFAULT_MAP_SIZE)?;
+
+        sink.timeout_signal = timeout_signal;
+        sink.afl_map_shm = Some(shmem);
+
+        Ok(sink)
     }
 
     pub fn from_config(config: &Config, id: Option<usize>) -> Result<AflSink> {
@@ -250,7 +338,25 @@ impl AflSink {
         }
     }
 
+    #[allow(unreachable_code)]
     pub fn start(&mut self) -> Result<()> {
+        log::debug!("Starting sink");
+
+        log::debug!("Creating POSIX queues");
+        log::debug!("Creating MQ recv: {}", self.mq_recv_name);
+        let mq = posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open(&self.mq_recv_name)
+            .context("Failed to create sink recv MQ")?;
+        self.mq_recv = Some(mq);
+
+        log::debug!("Creating MQ send: {}", self.mq_send_name);
+        let mq = posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open(&self.mq_send_name)
+            .context("Failed to create sink send MQ")?;
+        self.mq_send = Some(mq);
+
         // send_pipe[1](we) -> send_pipe[0](forkserver).
         let send_pipe = [0i32; 2];
         // receive_pipe[1](forkserver) -> receive_pipe[0](we).
@@ -286,7 +392,6 @@ impl AflSink {
                 to lock the output buffer, thus using logging here is forbidden
                 and likely causes deadlocks.
                 */
-                let map_shm_id = self.bitmap.shm_id();
 
                 unsafe {
                     let ret = libc::setsid();
@@ -301,19 +406,37 @@ impl AflSink {
                 let mut args = self.args.clone();
                 args.insert(0, path.clone());
 
-                let argv_nonref: Vec<CString> = args
+                let argv: Vec<CString> = args
                     .iter()
                     .map(|arg| CString::new(arg.as_bytes()).unwrap())
                     .collect();
-                let mut argv: Vec<*const c_char> =
-                    argv_nonref.iter().map(|arg| arg.as_ptr()).collect();
-                argv.push(std::ptr::null());
 
                 // Setup environment
-                let mut envp: Vec<*const c_char> = Vec::new();
-                let shm_env_var =
-                    CString::new(format!("{}={}", AFL_SHM_ENV_VAR_NAME, map_shm_id)).unwrap();
-                envp.push(shm_env_var.as_ptr());
+                let mut envp: Vec<CString> = Vec::new();
+                let shm_env_var = CString::new(format!(
+                    "{}={}",
+                    AFL_SHM_ENV_VAR_NAME,
+                    self.afl_map_shm.as_ref().unwrap().id()
+                ))
+                .unwrap();
+                envp.push(shm_env_var);
+
+                let env_mq_recv = CString::new(
+                    format!("FT_MQ_SINK_SEND={}", self.mq_recv_name.as_str()).as_bytes(),
+                )
+                .expect("Failed to format FT_MQ_SEND");
+                envp.push(env_mq_recv);
+
+                let env_mq_send = CString::new(
+                    format!("FT_MQ_SINK_RECV={}", self.mq_send_name.as_str()).as_bytes(),
+                )
+                .expect("Failed to format FT_MQ_RECV");
+                envp.push(env_mq_send);
+
+                let env_log_level =
+                    CString::new(format!("{}={}", ENV_LOG_LEVEL, current_log_level()).as_bytes())
+                        .expect("Failed to format FT_LOG_LEVEL");
+                envp.push(env_log_level);
 
                 let mut env_from_config = Vec::new();
                 if let Some(cfg) = self.config.as_ref() {
@@ -323,14 +446,16 @@ impl AflSink {
                     })
                 }
 
-                let afl_maps_size =
-                    CString::new(format!("AFL_MAP_SIZE={}", self.bitmap().size())).unwrap();
-                envp.push(afl_maps_size.as_bytes().as_ptr() as *const i8);
+                let afl_maps_size = CString::new(format!(
+                    "__AFL_MAP_SIZE={}",
+                    self.afl_map_shm.as_ref().unwrap().len()
+                ))
+                .unwrap();
+                envp.push(afl_maps_size);
 
                 env_from_config.iter().for_each(|e| {
-                    envp.push(e.as_bytes().as_ptr() as *const i8);
+                    envp.push(e.to_owned());
                 });
-                envp.push(std::ptr::null());
 
                 let dev_null_fd = unsafe {
                     let path = CString::new("/dev/null".as_bytes()).unwrap();
@@ -340,21 +465,21 @@ impl AflSink {
                     panic!("Failed to open /dev/null");
                 }
 
-                match self.input_channel {
-                    InputChannel::Stdin => unsafe {
-                        libc::dup2(self.input_file.0.as_raw_fd(), 0);
-                    },
-                    _ => unsafe {
-                        libc::dup2(dev_null_fd, 0);
-                    },
-                }
+                // match self.input_channel {
+                //     InputChannel::Stdin => unsafe {
+                //         libc::dup2(self.input_file.0.as_raw_fd(), libc::STDIN_FILENO);
+                //     },
+                //     _ => unsafe {
+                //         libc::dup2(dev_null_fd, libc::STDIN_FILENO);
+                //     },
+                // }
 
                 if self.log_stdout {
-                    // unsafe {
-                    //     let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
-                    //     libc::dup2(fd, libc::STDOUT_FILENO);
-                    //     libc::close(fd);
-                    // }
+                    unsafe {
+                        let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
+                        libc::dup2(fd, libc::STDOUT_FILENO);
+                        libc::close(fd);
+                    }
                 } else {
                     unsafe {
                         libc::dup2(dev_null_fd, libc::STDOUT_FILENO);
@@ -362,11 +487,11 @@ impl AflSink {
                 }
 
                 if self.log_stderr {
-                    //unsafe {
-                    // let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
-                    // libc::dup2(fd, libc::STDERR_FILENO);
-                    // libc::close(fd);
-                    //}
+                    unsafe {
+                        let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
+                        libc::dup2(fd, libc::STDERR_FILENO);
+                        libc::close(fd);
+                    }
                 } else {
                     unsafe {
                         libc::dup2(dev_null_fd, libc::STDERR_FILENO);
@@ -421,8 +546,27 @@ impl AflSink {
                     let ret = libc::setrlimit(libc::RLIMIT_AS, &rlim as *const libc::rlimit);
                     assert_eq!(ret, 0);
 
-                    let ret = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
-                    assert_eq!(ret, 0);
+                    // Disable ASLR of sink, may be useless.
+                    let _ = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
+                    let check_personality = libc::personality(0xffffffff);
+                    if check_personality & libc::ADDR_NO_RANDOMIZE == 0 {
+                        let err = std::io::Error::last_os_error();
+                        let errno = err.raw_os_error().unwrap_or(0);
+                        // 根据错误码进行判断
+                        match errno {
+                            libc::EINVAL => {
+                                log::error!("Invalid argument");
+                            }
+                            libc::EPERM => {
+                                log::error!("Operation not permitted");
+                            }
+                            // 其他错误处理...
+                            _ => {
+                                log::error!("Unknown error: {}", errno);
+                            }
+                        }
+                        panic!("Failed to disable ASLR");
+                    }
                 }
 
                 if let Err(err) = self.drop_privileges() {
@@ -436,10 +580,13 @@ impl AflSink {
                 assert_eq!(nix::unistd::getuid(), nix::unistd::geteuid());
                 assert_eq!(nix::unistd::getegid(), nix::unistd::getegid());
 
+                // Copy all environment variables from current process into the new process
+                env::vars()
+                    .for_each(|e| envp.push(CString::new(format!("{}={}", e.0, e.1)).unwrap()));
+
                 let prog = CString::new(path.as_bytes()).unwrap();
-                unsafe {
-                    libc::execve(prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
-                }
+                nix::unistd::execve(&prog, &argv, &envp).unwrap();
+
                 unreachable!("Failed to call execve on '{}'", path);
             }
             _ => { /* The parent */ }
@@ -449,7 +596,7 @@ impl AflSink {
 
         // Note th sid, thus we can kill the child later.
         // This is a sid since the child calls setsid().
-        self.forkserver_sid = Some(child_pid);
+        self.forkserver_pid = Some(child_pid);
 
         // Close the pipe ends used by the child.
         unsafe {
@@ -480,43 +627,70 @@ impl AflSink {
                     ret
                 )));
             }
-
-            // Process extended attributes used by AFL++.
-            // Sett src/afl-forkserver.c:689 (afl_fsrv_start)
-            let status = u32::from_ne_bytes(buffer);
-            log::info!("Forkserver status: 0x{:x}", status);
-            if status & FS_OPT_MAPSIZE == FS_OPT_MAPSIZE {
-                log::info!("Got extended option FS_OPT_MAPSIZE from forkserver");
-                let new_map_size = ((status & 0x00fffffe) >> 1) + 1;
-                log::info!("Target requests a map of size {} bytes", new_map_size);
-                log::info!("Current map size is {} bytes", self.bitmap().size());
-                if self.bitmap_was_resize {
-                    log::info!("Already resized, skipping....");
-                    return Ok(());
-                }
-
-                let new_map_size = new_map_size.next_power_of_two() as usize;
-                if new_map_size > self.bitmap().size() {
-                    log::info!("Resizing bitmap to {} bytes", new_map_size);
-                    self.stop();
-                    let new_map = Bitmap::new_in_shm(new_map_size, 0x00);
-                    let _ = mem::replace(self.bitmap(), new_map);
-                    self.bitmap_was_resize = true;
-                    return self.start();
-                }
-            }
         }
 
-        // if self.stdout_file.is_some() {
-        //     // Take the the stdout file thus its fd gets dropped.
-        //     self.stdout_file.take();
-        // }
-        // if self.stderr_file.is_some() {
-        //     // Take the the stderr file thus its fd gets dropped.
-        //     self.stderr_file.take();
-        // }
+        if self.stdout_file.is_some() {
+            // Take the the stdout file thus its fd gets dropped.
+            self.stdout_file.take();
+        }
+        if self.stderr_file.is_some() {
+            // Take the the stderr file thus its fd gets dropped.
+            self.stderr_file.take();
+        }
+
+        self.start_message_loop()?;
 
         // We are ready to fuzz!
+        Ok(())
+    }
+
+    fn start_message_loop(&mut self) -> Result<()> {
+        let handler = self.message_loop_handler.clone();
+        let mq_recv = self.mq_recv.take().unwrap();
+        let _: JoinHandle<Result<()>> = thread::spawn(move || {
+            let mut assembler = AuxStreamAssembler::new();
+            let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
+            loop {
+                let h = handler.read().map_err(|e| anyhow!(e.to_string()))?;
+                if !*h {
+                    break;
+                }
+                drop(h);
+                match mq_recv.receive_timeout(&mut buf, DEFAULT_SINK_RECEIVE_TIMEOUT) {
+                    Ok(_) => {
+                        log::trace!("Received message from sink");
+                        let header = MsgHeader::try_from_bytes(&buf)?;
+                        if header.id != MessageType::AuxStreamMessage {
+                            continue;
+                        }
+                        let msg = AuxStreamMessage::try_from_bytes(&buf)?;
+                        match assembler.process_str_msg(msg) {
+                            Ok(Some((ty, s))) => match ty {
+                                AuxStreamType::LogRecord => {
+                                    Source::process_log_record_message(s);
+                                }
+                                _ => log::error!("Received message on unsupported channel."),
+                            },
+                            Ok(None) => {
+                                log::trace!("Received incomplete message, continue to receive");
+                            }
+                            Err(err) => log::error!("Error while decoding aux stream: {}", err),
+                        }
+                    }
+                    Err(e) => match e.kind() {
+                        io::ErrorKind::TimedOut => {
+                            log::trace!("Sink message loop timed out");
+                            continue;
+                        }
+                        _ => {
+                            log::error!("{}", e.to_string());
+                        }
+                    },
+                }
+            }
+            Ok(())
+        });
+
         Ok(())
     }
 
@@ -538,7 +712,9 @@ impl AflSink {
     /// Stops the forksever. Must be called before calling start() again.
     /// It is save to call this function multiple times.
     pub fn stop(&mut self) {
-        if let Some(sid) = self.forkserver_sid.take() {
+        let mut h = self.message_loop_handler.write().unwrap();
+        *h = false;
+        if let Some(sid) = self.forkserver_pid.take() {
             unsafe {
                 libc::close(self.send_fd.unwrap());
                 libc::close(self.receive_fd.unwrap());
@@ -566,8 +742,12 @@ impl AflSink {
         self.input_file.0.sync_all().unwrap();
     }
 
-    pub fn run(&mut self, timeout: Duration) -> Result<RunResult> {
-        self.bitmap().reset();
+    pub fn run(&mut self, _timeout: Duration) -> Result<RunResult> {
+        panic!("run() not implemented!");
+    }
+
+    pub fn fork(&mut self) -> Result<()> {
+        self.purge_workdir();
 
         let buffer = [0u8; 4];
         let buf_ptr = buffer.as_ptr() as *mut libc::c_void;
@@ -591,8 +771,6 @@ impl AflSink {
         }
 
         let child_pid = i32::from_le_bytes(buffer);
-        log::trace!("Got child pid {}", child_pid);
-
         if child_pid <= 0 {
             log::error!("Child pid '{}' is invalid", child_pid);
             return Err(anyhow!(
@@ -602,45 +780,53 @@ impl AflSink {
             ));
         }
 
-        log::trace!("Waiting for child termination");
-        match self.wait_for_data(timeout) {
-            Ok(_) => (),
-            Err(err) => {
-                log::trace!("Child timed out: {:#?}", err);
-                // Kill the child since it appears to have timed out.
+        log::trace!("Got child pid {}", child_pid);
+        self.child_pid = Some(child_pid);
+
+        Ok(())
+    }
+
+    pub fn terminate(&mut self) -> Result<RunResult> {
+        let buffer = [0u8; 4];
+        let buf_ptr = buffer.as_ptr() as *mut libc::c_void;
+
+        match self.wait_for_data(Duration::ZERO) {
+            Ok(_) => {
+                // The child is already terminated.
+                // But this may barely happened, unless the SUT is signaled.
+                log::trace!("Sink child already terminated or signaled");
+            }
+            Err(_) => {
+                // The child is still running
+                log::trace!("Sink child is still running, so kill it manully");
                 let kill_ret = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(child_pid),
-                    nix::sys::signal::SIGKILL,
+                    nix::unistd::Pid::from_raw(self.child_pid.unwrap()),
+                    nix::sys::signal::SIGTERM,
                 );
                 if let Err(ref err) = kill_ret {
                     // This might just be caused by the fact that the child won the race
                     // and terminated before we killed it.
                     log::trace!("Failed to kill child: {:#?}", err);
                 }
+                // Read the exit status of the child, after killing
                 if let Err(err) = self
                     .wait_for_data(AFL_DEFAULT_TIMEOUT)
                     .context("Child did not acknowledge termination request")
                 {
-                    let reason = try_get_child_exit_reason(self.forkserver_sid.unwrap());
+                    // The forkserver is not responding
+                    let reason = try_get_child_exit_reason(self.forkserver_pid.unwrap());
                     log::error!(
                         "Exit reason: {:#?}, child_pid={:?}, kill_ret={:?}",
                         reason,
-                        child_pid,
+                        self.child_pid.unwrap(),
                         kill_ret
                     );
                     return Err(err.context(format!("child_exit_reason={:#?}", reason)));
                 }
-
-                // Consume exit status.
-                let ret = unsafe { libc::read(self.receive_fd.unwrap(), buf_ptr, 4) };
-                if ret != 4 {
-                    log::error!("Expected {} != 4", ret);
-                }
-                return Ok(RunResult::TimedOut);
             }
         }
 
-        log::trace!("Child terminated, getting exit status");
+        log::trace!("Sink child terminated, getting exit status");
         let ret =
             repeat_on_interrupt(|| unsafe { libc::read(self.receive_fd.unwrap(), buf_ptr, 4) });
         if ret != 4 {
@@ -649,9 +835,12 @@ impl AflSink {
         }
 
         let exit_status = i32::from_le_bytes(buffer);
+        log::trace!("Sink child status is {}", exit_status);
 
-        log::trace!("Child status is {}", exit_status);
         if libc::WIFEXITED(exit_status) {
+            // The child exited normally, through end of main() or exit(x).
+            // Since the SUT server is usually running daemonly,
+            // It could rarely exited normally.
             Ok(RunResult::Terminated(libc::WEXITSTATUS(exit_status)))
         } else if libc::WIFSIGNALED(exit_status) {
             let signal = libc::WTERMSIG(exit_status);
@@ -666,14 +855,47 @@ impl AflSink {
                     Signal::SIGUSR2
                 }
             };
-            Ok(RunResult::Signalled(signal))
+            match signal {
+                Signal::SIGKILL => Ok(RunResult::TimedOut),
+                Signal::SIGTERM => Ok(RunResult::Terminated(0)),
+                _ => Ok(RunResult::Signalled(signal)),
+            }
         } else {
             unreachable!();
         }
     }
 
     pub fn bitmap(&mut self) -> &mut Bitmap {
-        &mut self.bitmap
+        panic!("bitmap() not implemented! You should use MapObserver in LibAFL instead");
+    }
+
+    fn purge_workdir(&self) {
+        log::trace!("Purging workdir");
+        if let Err(err) = self._purge_workdir() {
+            log::warn!("Failed to purge workdir: {:#?}", err);
+        }
+        let _ = fs::create_dir_all(&self.workdir);
+    }
+
+    fn _purge_workdir(&self) -> Result<()> {
+        let mut delete_ctr = 0usize;
+        let dir = fs::read_dir(&self.workdir)?;
+        for entry in dir {
+            let entry = entry?;
+            if !self.workdir_file_whitelist.contains(&entry.path()) && entry.path() != self.workdir
+            {
+                if entry.path().is_file() {
+                    fs::remove_file(entry.path())?;
+                    delete_ctr += 1;
+                } else if entry.path().is_dir() {
+                    fs::remove_dir_all(entry.path())?;
+                    delete_ctr += 1;
+                }
+            }
+        }
+
+        log::trace!("Purged {} files from workdir", delete_ctr);
+        Ok(())
     }
 }
 

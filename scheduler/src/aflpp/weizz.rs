@@ -72,7 +72,14 @@ impl WeizzWorker {
         let mut cmd = Command::new("/weizz-fuzzer/weizz");
         cmd.current_dir("/tmp");
 
-        let inputs_dir = self.config.aflpp.as_ref().unwrap().input_dir.to_str().unwrap();
+        let inputs_dir = self
+            .config
+            .aflpp
+            .as_ref()
+            .unwrap()
+            .input_dir
+            .to_str()
+            .unwrap();
 
         cmd.args([
             "-o",

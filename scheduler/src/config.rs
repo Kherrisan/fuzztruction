@@ -231,7 +231,7 @@ pub struct GeneralConfig {
     pub mitm_port: u16,
     pub target_port: u16,
     pub mitm_buf_size: Option<usize>,
-    pub max_interactions: Option<u16>
+    pub max_interactions: Option<u16>,
 }
 
 impl GeneralConfig {
@@ -779,7 +779,7 @@ impl ConfigBuilder {
             mitm_port: socket_host,
             target_port: socket_port,
             mitm_buf_size: None,
-            max_interactions: None
+            max_interactions: None,
         })
     }
 

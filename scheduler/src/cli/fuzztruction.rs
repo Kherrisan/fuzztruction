@@ -292,7 +292,6 @@ fn setup_logging(matches: &ArgMatches, config: &scheduler::config::Config) {
     logging::setup_panic_logging();
 }
 
-
 /// Returns a `AtomicBool` that is set to `true` when a SIGTERM or SIGINT is received.
 fn register_on_termination_flag() -> Arc<AtomicBool> {
     let termination_requested_flag = Arc::new(AtomicBool::new(false));
