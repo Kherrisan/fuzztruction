@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use core::slice;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io, mem::size_of, num::NonZeroU64};
 
 use crate::shared_memory::{MmapShMem, MmapShMemProvider};
@@ -7,8 +8,10 @@ use crate::shared_memory::{MmapShMem, MmapShMemProvider};
 pub const ENV_FT_TRACE_SHM: &str = "TRACE";
 pub const DEFAULT_TRACE_MAP_LEN: usize = 0x1000000;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TraceMap {
+    // TODO:
+    // struct field and impl should be consistent with StdMapObserver
     header: *mut TraceMapHeader,
     _shared_memory: MmapShMem,
     allocated_slots: HashSet<u64>,
@@ -16,6 +19,29 @@ pub struct TraceMap {
 }
 
 unsafe impl Send for TraceMap {}
+
+impl Serialize for TraceMap {
+    fn serialize<S>(&self, _serializer: S) -> std::prelude::v1::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        unimplemented!()
+        // TODO:
+        // 随便写的，要不然编译不通过
+        // MmapShMem is not serialized?
+    }
+}
+
+impl<'de> Deserialize<'de> for TraceMap {
+    // TODO:
+    // 随便写的，要不然编译不通过
+    fn deserialize<D>(_deserializer: D) -> std::prelude::v1::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        unimplemented!()
+    }
+}
 
 impl TraceMap {
     fn header(&self) -> &TraceMapHeader {
@@ -176,6 +202,7 @@ impl TraceMap {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TraceMapHeader {
     capacity: usize,
     len: usize,

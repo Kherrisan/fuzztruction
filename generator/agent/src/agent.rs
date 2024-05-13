@@ -159,13 +159,13 @@ pub fn start_forkserver() {
 
     update_proc_mappings();
 
-    info!("Sending HelloMessage");
+    debug!("Sending HelloMessage");
     send_message(
         messages::HelloMessage::new(unsafe { libc::gettid() }),
         HANDSHAKE_TIMEOUT,
     )
     .expect("Failed to send HelloMessage.");
-    info!("HelloMessage send");
+    debug!("HelloMessage send");
 
     process_messages();
 }
