@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::Local;
 use fuzztruction_shared::mutation_cache::MutationCache;
 use hex::ToHex;
 use nix::sys::signal::Signal;

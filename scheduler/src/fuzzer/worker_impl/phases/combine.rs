@@ -6,9 +6,7 @@ use crate::{
 };
 
 use anyhow::Result;
-use fuzztruction_shared::{
-    mutation_cache::MutationCache, mutation_cache_entry::MutationCacheEntry,
-};
+use fuzztruction_shared::mutation_cache::MutationCache;
 use rand::{prelude::SliceRandom, thread_rng};
 
 use super::FuzzingPhase;
@@ -81,7 +79,8 @@ impl FuzzingWorker {
             let mut mutators = Vec::new();
             let entry = Rc::new(RefCell::new(entry));
 
-            let mutator = mutators::CombineMutator::new(entry.clone(), msks, entry.borrow().is_nop());
+            let mutator =
+                mutators::CombineMutator::new(entry.clone(), msks, entry.borrow().is_nop());
             mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
 
             mutations.push((entry, mutators));

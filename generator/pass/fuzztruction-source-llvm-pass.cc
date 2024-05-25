@@ -51,18 +51,30 @@ We need the following capabilites:
         - ?We need some RT to transfer the traces to the parent
 */
 
-namespace {
+namespace
+{
 
-    class FuzztructionSourcePass : public ModulePass {
+    class FuzztructionSourcePass : public ModulePass
+    {
 
     public:
-
         static char ID;
         static bool allow_ptr_ty;
         static bool allow_vec_ty;
-        FuzztructionSourcePass() : ModulePass(ID) { }
+        FuzztructionSourcePass() : ModulePass(ID) {}
 
-        enum InsTy {Random = 0, Load = 1, Store = 2, Add = 3, Sub = 4, Icmp = 5, Select = 6, Branch = 7, Switch = 8};
+        enum InsTy
+        {
+            Random = 0,
+            Load = 1,
+            Store = 2,
+            Add = 3,
+            Sub = 4,
+            Icmp = 5,
+            Select = 6,
+            Branch = 7,
+            Switch = 8
+        };
         static std::string insTyNames[9];
 
         bool initializeFuzzingStub(Module &M);
@@ -76,35 +88,36 @@ namespace {
 
         bool runOnModule(Module &M) override;
 
-        StringRef getPassName() const override {
+        StringRef getPassName() const override
+        {
             return "FuzzTruction Source Pass";
         }
-
     };
-
 
 }
 
 /*
 Specify instruction types, which we want to instrument with probability p
 */
-struct InsHook {
+struct InsHook
+{
     FuzztructionSourcePass::InsTy type;
     uint8_t probability;
 
-    std::string to_string() {
+    std::string to_string()
+    {
         return "InsHook{ ins_ty=" + FuzztructionSourcePass::insTyNames[type] +
-                ", probability=" + std::to_string(probability) + "% }";
+               ", probability=" + std::to_string(probability) + "% }";
     }
 };
 
-inline bool operator<(const InsHook& lhs, const InsHook& rhs)
+inline bool operator<(const InsHook &lhs, const InsHook &rhs)
 {
-  return lhs.type < rhs.type;
+    return lhs.type < rhs.type;
 }
 
-
-bool FuzztructionSourcePass::runOnModule(Module &M) {
+bool FuzztructionSourcePass::runOnModule(Module &M)
+{
 
     bool module_modified = false;
 
@@ -115,65 +128,67 @@ bool FuzztructionSourcePass::runOnModule(Module &M) {
     return module_modified;
 }
 
-
 /*
 Split a string containing multiple comma-separated keywords
 and return the set of these keywords
 */
-std::vector<std::string> split_string(std::string s, char delim) {
+std::vector<std::string> split_string(std::string s, char delim)
+{
     size_t pos_start = 0, pos_end;
     std::string token;
     std::vector<std::string> res;
 
-    while ((pos_end = s.find (delim, pos_start)) != std::string::npos) {
-        token = s.substr (pos_start, pos_end - pos_start);
+    while ((pos_end = s.find(delim, pos_start)) != std::string::npos)
+    {
+        token = s.substr(pos_start, pos_end - pos_start);
         pos_start = pos_end + 1;
         res.push_back(token);
     }
 
-    res.push_back(s.substr (pos_start));
+    res.push_back(s.substr(pos_start));
     return res;
 }
 
 /*
 Check if an environment variable is set.
 */
-bool env_var_set(const char* env_var) {
-    const char* envp = std::getenv(env_var);
+bool env_var_set(const char *env_var)
+{
+    const char *envp = std::getenv(env_var);
     if (envp)
         return true;
     return false;
 }
 
-
 /*
 Convert environment variable content to a set.
 Expects comma-separated list of values in the env var.
 */
-std::vector<std::string> parse_env_var_list(const char* env_var) {
-    const char* envp = std::getenv(env_var);
+std::vector<std::string> parse_env_var_list(const char *env_var)
+{
+    const char *envp = std::getenv(env_var);
     if (!envp)
-        return std::vector<std::string> ();
+        return std::vector<std::string>();
     return split_string(std::string(envp), /* delim = */ ',');
 }
-
 
 /*
 Extract integer specified in environment variable.
 */
-uint32_t parse_env_var_int(const char* env_var, uint32_t default_val) {
-    const char* envp = std::getenv(env_var);
+uint32_t parse_env_var_int(const char *env_var, uint32_t default_val)
+{
+    const char *envp = std::getenv(env_var);
     if (!envp)
         return default_val;
     uint32_t val = (uint32_t)std::stol(envp);
     return val;
 }
 
-
 /*
 Convert set of strings to known instruction types. Ignores unknown elements.
 */
-FuzztructionSourcePass::InsTy to_InsTy(std::string input) {
+FuzztructionSourcePass::InsTy to_InsTy(std::string input)
+{
     // dbgs() << "val=" << val << "\n";
     if (input == "random")
         return FuzztructionSourcePass::InsTy::Random;
@@ -198,11 +213,11 @@ FuzztructionSourcePass::InsTy to_InsTy(std::string input) {
     exit(1);
 }
 
-
 /*
 Convert a string of format "name:probability" to InsHook struct.
 */
-InsHook to_InsHook(std::string s) {
+InsHook to_InsHook(std::string s)
+{
     int pos = s.find_first_of(':');
     if (pos == std::string::npos)
         return {to_InsTy(s), 100};
@@ -212,8 +227,8 @@ InsHook to_InsHook(std::string s) {
     return {to_InsTy(name), (uint8_t)prob};
 }
 
-
-bool FuzztructionSourcePass::initializeFuzzingStub(Module &M) {
+bool FuzztructionSourcePass::initializeFuzzingStub(Module &M)
+{
     /*
     Used to initialize our fuzzing stub. We can not use the llvm constructor attribute because
     our stub relies on keystone which has static constructors that are executed after functions
@@ -221,7 +236,8 @@ bool FuzztructionSourcePass::initializeFuzzingStub(Module &M) {
     */
     auto hook_fn = M.getOrInsertFunction("__ft_auto_init", FunctionType::getVoidTy(M.getContext()));
     auto main_fn = M.getFunction("main");
-    if (main_fn) {
+    if (main_fn)
+    {
         IRBuilder<> ins_builder(main_fn->getEntryBlock().getFirstNonPHI());
         ins_builder.CreateCall(hook_fn);
     }
@@ -229,21 +245,24 @@ bool FuzztructionSourcePass::initializeFuzzingStub(Module &M) {
     return true;
 }
 
-
 /*
 Delete call if one of the functions specified by name is called
 */
-bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_ins, std::set<std::string> &target_functions) {
+bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_ins, std::set<std::string> &target_functions)
+{
     Function *callee = call_ins->getCalledFunction();
     // skip indirect calls
-    if (!callee) {
+    if (!callee)
+    {
         return false;
     }
     // if called function should be deleted, erase it from IR
-    if (target_functions.count(callee->getName().str())) {
+    if (target_functions.count(callee->getName().str()))
+    {
         // if the callee expects a ret value, we cannot simply replace the function
         // TODO: we could determine type and replace Inst with Value
-        if (!call_ins->getCalledFunction()->getReturnType()->isVoidTy()) {
+        if (!call_ins->getCalledFunction()->getReturnType()->isVoidTy())
+        {
             errs() << "Cannot delete " << callee->getName() << " as it returns\n";
             return false;
         }
@@ -254,12 +273,12 @@ bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_i
     return false;
 }
 
-
 /*
 Get vector of default patchpoint arguments we need for every patchpoint.
 ID is set depending on which type of instruction is instrumented.
 */
-std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint32_t id) {
+std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint32_t id)
+{
     IntegerType *i64_type = IntegerType::getInt64Ty(M.getContext());
     IntegerType *i32_type = IntegerType::getInt32Ty(M.getContext());
     IntegerType *i8_type = IntegerType::getInt8Ty(M.getContext());
@@ -277,8 +296,8 @@ std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint32
 
     /*The function we are calling */
     auto null_ptr = ConstantPointerNull::get(PointerType::get(i8_type, 0));
-    //Constant *fnptr = ConstantInt::get(i32_type, 1);
-    //auto null_ptr = ConstantExpr::getIntToPtr(fnptr, PointerType::get(i8_type, 0));
+    // Constant *fnptr = ConstantInt::get(i32_type, 1);
+    // auto null_ptr = ConstantExpr::getIntToPtr(fnptr, PointerType::get(i8_type, 0));
     patchpoint_args.push_back(null_ptr);
 
     /*
@@ -292,12 +311,12 @@ std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint32
     return patchpoint_args;
 }
 
-
 /*
 Instrument the output value of the instruction. In other words, the value produced by the instruction
 is the live value fed into the patchpoint.
 */
-bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_intr, Instruction *ins) {
+bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_intr, Instruction *ins)
+{
     // dbgs() << "instrumentInsOutput called\n";
     Instruction *next_ins = ins;
     /* In case of a load the patchpoint is inserted after the load was executed */
@@ -321,13 +340,13 @@ bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_i
     return true;
 }
 
-
 /*
 Instrument (one of) the input value(s) to the instruction (as specified by operand index).
 This input value is the live value connected to the patchpoint, where it can be modified before being
 processed by the instruction.
 */
-bool FuzztructionSourcePass::instrumentInsArg(Module &M, Function *stackmap_intr, Instruction *ins, uint8_t op_idx) {
+bool FuzztructionSourcePass::instrumentInsArg(Module &M, Function *stackmap_intr, Instruction *ins, uint8_t op_idx)
+{
     // dbgs() << "instrumentInsArg called\n";
     if (!ins)
         return false;
@@ -348,8 +367,8 @@ bool FuzztructionSourcePass::instrumentInsArg(Module &M, Function *stackmap_intr
     return true;
 }
 
-
-bool isValidTy(Type* ty) {
+bool isValidTy(Type *ty)
+{
     if (ty->isIntegerTy())
         return true;
     if (FuzztructionSourcePass::allow_ptr_ty && ty->isPointerTy())
@@ -366,7 +385,8 @@ Ensure that
 2) we support the type (integer, vec, and ptr types currently)
 3) we exclude "weird" instructions (e.g., debug instructions, phi nodes etc)
 */
-bool canBeInstrumented(Instruction *ins) {
+bool canBeInstrumented(Instruction *ins)
+{
     // ignore instructions that are never used
     if (ins->users().begin() == ins->users().end())
         return false;
@@ -394,7 +414,6 @@ bool canBeInstrumented(Instruction *ins) {
     return true;
 }
 
-
 /*
 Instrument all instructions and delete function calls specified by the user via environment variables.
 
@@ -409,11 +428,11 @@ Instruction name must be one of the following: add, sub, store, load, random
 The value random is special in the sense that each instruction we can instrument, is actually instrumented.
 We recommend to set a probability, at least for random (to avoid instrumenting too many instructions).
 */
-bool FuzztructionSourcePass::injectPatchPoints(Module &M) {
+bool FuzztructionSourcePass::injectPatchPoints(Module &M)
+{
     /* Get the patchpoint intrinsic */
-    Function* stackmap_intr = Intrinsic::getDeclaration(&M,
-        Intrinsic::experimental_patchpoint_void
-    );
+    Function *stackmap_intr = Intrinsic::getDeclaration(&M,
+                                                        Intrinsic::experimental_patchpoint_void);
     stackmap_intr->setCallingConv(CallingConv::AnyReg);
 
     FuzztructionSourcePass::allow_ptr_ty = !env_var_set("FT_NO_PTR_TY");
@@ -421,17 +440,19 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M) {
 
     // Get functions which should not be called (i.e., for which we delete calls to)
     auto fn_del_vec = parse_env_var_list("FT_NOP_FN");
-    std::set<std::string> fn_del (fn_del_vec.begin(), fn_del_vec.end());
+    std::set<std::string> fn_del(fn_del_vec.begin(), fn_del_vec.end());
     dbgs() << "FT: Deleting function calls to " << fn_del.size() << " functions\n";
 
     // Get instruction types we want to instrument
     std::set<InsHook> hook_ins = {};
-    for (std::string e : parse_env_var_list("FT_HOOK_INS")) {
+    for (std::string e : parse_env_var_list("FT_HOOK_INS"))
+    {
         dbgs() << "FT DEBUG: parsed ins_hook: " << to_InsHook(e).to_string() << "\n";
         hook_ins.insert(to_InsHook(e));
     }
     dbgs() << "FT: Instrumenting " << hook_ins.size() << " types of instructions\n";
-    if (!hook_ins.size()) {
+    if (!hook_ins.size())
+    {
         errs() << "FT: FT_HOOK_INS is not set\n";
     }
 
@@ -443,14 +464,18 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M) {
     // Track whether we modified the module
     bool modified = false;
     uint64_t num_patchpoints = 0;
-    for (auto &F : M) {
-        for (auto &B : F) {
-            for (BasicBlock::iterator DI = B.begin(); DI != B.end(); ) {
+    for (auto &F : M)
+    {
+        for (auto &B : F)
+        {
+            for (BasicBlock::iterator DI = B.begin(); DI != B.end();)
+            {
                 // ensure that iterator points to next instruction
                 // in case we need to delete the instruction
-                Instruction& I = *DI++;
+                Instruction &I = *DI++;
 
-                if (auto *call_ins = dyn_cast<CallInst>(&I)) {
+                if (auto *call_ins = dyn_cast<CallInst>(&I))
+                {
                     bool deleted = maybeDeleteFunctionCall(M, call_ins, fn_del);
                     modified |= deleted;
                     // No point to continue if we just deleted the instruction
@@ -459,67 +484,78 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M) {
                 }
 
                 // Check if the current instruction is hooked.
-                for (const auto& ins_hook : hook_ins) {
+                for (const auto &ins_hook : hook_ins)
+                {
                     bool ins_modified = false;
-                    switch (ins_hook.type) {
-                        case FuzztructionSourcePass::InsTy::Load:
-                            if (auto *load_op = dyn_cast<LoadInst>(&I)) {
-                                if (distr(gen) <= ins_hook.probability)
-                                    ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Store:
-                            if (auto *store_op = dyn_cast<StoreInst>(&I)) {
-                                if (distr(gen) <= ins_hook.probability)
-                                    ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Add:
-                            if (I.getOpcode() == Instruction::Add) {
-                                if (distr(gen) <= ins_hook.probability)
-                                    ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Sub:
-                            if (I.getOpcode() == Instruction::Sub) {
-                                if (distr(gen) <= ins_hook.probability)
-                                    ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 1);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Icmp:
-                            if (I.getOpcode() == Instruction::ICmp) {
-                                if (distr(gen) <= ins_hook.probability)
-                                    ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Select:
-                            if (I.getOpcode() == Instruction::Select) {
-                                if (distr(gen) <= ins_hook.probability)
-                                    // Arg 0 is the selection mask
-                                    ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Branch:
-                            // FIXME: Fails to compile.
-                            // if (I.getOpcode() == Instruction::Br && distr(gen) <= ins_hook.probability) {
-                            //     // Arg 0 is the branch condition (i1)
-                            //     ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
-                            // }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Switch:
-                            if (I.getOpcode() == Instruction::Switch && distr(gen) <= ins_hook.probability) {
-                                // Arg 0 is the switch condition (i1)
-                                ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
-                            }
-                            break;
-                        case FuzztructionSourcePass::InsTy::Random:
-                            if (!canBeInstrumented(&I))
-                                break;
-                            if (distr(gen) <= ins_hook.probability) {
+                    switch (ins_hook.type)
+                    {
+                    case FuzztructionSourcePass::InsTy::Load:
+                        if (auto *load_op = dyn_cast<LoadInst>(&I))
+                        {
+                            if (distr(gen) <= ins_hook.probability)
                                 ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
-                            }
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Store:
+                        if (auto *store_op = dyn_cast<StoreInst>(&I))
+                        {
+                            if (distr(gen) <= ins_hook.probability)
+                                ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Add:
+                        if (I.getOpcode() == Instruction::Add)
+                        {
+                            if (distr(gen) <= ins_hook.probability)
+                                ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Sub:
+                        if (I.getOpcode() == Instruction::Sub)
+                        {
+                            if (distr(gen) <= ins_hook.probability)
+                                ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 1);
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Icmp:
+                        if (I.getOpcode() == Instruction::ICmp)
+                        {
+                            if (distr(gen) <= ins_hook.probability)
+                                ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Select:
+                        if (I.getOpcode() == Instruction::Select)
+                        {
+                            if (distr(gen) <= ins_hook.probability)
+                                // Arg 0 is the selection mask
+                                ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Branch:
+                        // FIXME: Fails to compile.
+                        // if (I.getOpcode() == Instruction::Br && distr(gen) <= ins_hook.probability) {
+                        //     // Arg 0 is the branch condition (i1)
+                        //     ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
+                        // }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Switch:
+                        if (I.getOpcode() == Instruction::Switch && distr(gen) <= ins_hook.probability)
+                        {
+                            // Arg 0 is the switch condition (i1)
+                            ins_modified = instrumentInsArg(M, stackmap_intr, &I, /* op_idx = */ 0);
+                        }
+                        break;
+                    case FuzztructionSourcePass::InsTy::Random:
+                        if (!canBeInstrumented(&I))
+                            break;
+                        if (distr(gen) <= ins_hook.probability)
+                        {
+                            ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                        }
                     }
-                    if (ins_modified) {
+                    if (ins_modified)
+                    {
                         modified = true;
                         num_patchpoints++;
                         // instruction cannot have multiple types
@@ -529,8 +565,8 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M) {
                 }
             }
         }
-        //llvm::errs() << "dump-start\n";
-        //F.dump();
+        // llvm::errs() << "dump-start\n";
+        // F.dump();
     }
     dbgs() << "FT: Inserted " << num_patchpoints << " patchpoints\n";
 
@@ -541,40 +577,47 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M) {
 Filter & delete patchpoints if the live value is already used
 by another patchpoint.
 */
-bool FuzztructionSourcePass::filterInvalidPatchPoints(Module &M) {
+bool FuzztructionSourcePass::filterInvalidPatchPoints(Module &M)
+{
     bool modified = false;
-    Function* stackmap_intr = Intrinsic::getDeclaration(&M,
-        Intrinsic::experimental_patchpoint_void
-    );
+    Function *stackmap_intr = Intrinsic::getDeclaration(&M,
+                                                        Intrinsic::experimental_patchpoint_void);
     stackmap_intr->setCallingConv(CallingConv::AnyReg);
 
     int num_users = 0;
     dbgs() << "FT: Filtering invalid patch points\n";
     std::set<Value *> used_values = {};
     std::set<Instruction *> pending_deletions = {};
-    for (const auto& user : stackmap_intr->users()) {
+    for (const auto &user : stackmap_intr->users())
+    {
         num_users++;
-        if(CallInst* call_ins = dyn_cast<CallInst>(user)) {
-            //errs() << "is sen: " << call_ins->isKnownSentinel() << "\n";
-            for (unsigned i = 4; i < call_ins->getNumArgOperands(); ++i) {
-                //errs() << "call ins\n";
-                //dbgs() << "call ins on dbg\n";
-                //call_ins->dump();
-                //errs().flush();
+        if (CallInst *call_ins = dyn_cast<CallInst>(user))
+        {
+            // errs() << "is sen: " << call_ins->isKnownSentinel() << "\n";
+            for (unsigned i = 4; i < call_ins->getNumArgOperands(); ++i)
+            {
+                // errs() << "call ins\n";
+                // dbgs() << "call ins on dbg\n";
+                // call_ins->dump();
+                // errs().flush();
                 Value *val = call_ins->getArgOperand(i);
-                //errs() << "val\n";
-                //val->dump();
-                if (used_values.count(val) > 0) {
+                // errs() << "val\n";
+                // val->dump();
+                if (used_values.count(val) > 0)
+                {
                     pending_deletions.insert(call_ins);
                     break;
-                } else {
+                }
+                else
+                {
                     used_values.insert(val);
                 }
             }
         }
     }
-    for (auto &ins : pending_deletions) {
-        //assert(ins->isSafeToRemove() && "Instruction is not safe to remove!");
+    for (auto &ins : pending_deletions)
+    {
+        // assert(ins->isSafeToRemove() && "Instruction is not safe to remove!");
         assert((ins->users().end() == ins->users().begin()) && "Cannot delete call instruction as it has uses");
         modified = true;
         ins->eraseFromParent();
@@ -584,15 +627,16 @@ bool FuzztructionSourcePass::filterInvalidPatchPoints(Module &M) {
     return modified;
 }
 
-
 char FuzztructionSourcePass::ID = 0;
 bool FuzztructionSourcePass::allow_ptr_ty = false;
 bool FuzztructionSourcePass::allow_vec_ty = false;
 std::string FuzztructionSourcePass::insTyNames[] = {"random", "load", "store", "add", "sub", "icmp", "select", "br", "switch"};
 
 static void registerSourcePass(const PassManagerBuilder &,
-                            legacy::PassManagerBase &PM) {
-    if (!env_var_set("FT_DISABLE_INLINEING")) {
+                               legacy::PassManagerBase &PM)
+{
+    if (!env_var_set("FT_DISABLE_INLINEING"))
+    {
         PM.add(new FuzztructionSourcePreprocesssingPass());
         PM.add(llvm::createAlwaysInlinerLegacyPass());
     }
@@ -604,3 +648,6 @@ static RegisterStandardPasses RegisterSourcePass(
 
 static RegisterStandardPasses RegisterSourcePass0(
     PassManagerBuilder::EP_EnabledOnOptLevel0, registerSourcePass);
+
+// static RegisterPass<FuzztructionSourcePreprocesssingPass> preprocessingPass("preprocessing", "Fuzztruction Source Preprocessing Pass", false, false);
+// static RegisterPass<FuzztructionSourcePass> sourcePass("source", "Fuzztruction Source Pass", false, false);

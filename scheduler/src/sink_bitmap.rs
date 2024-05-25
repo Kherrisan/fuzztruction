@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 /* See afl config.h */
 const MAP_SIZE_POW2: usize = 18;
-pub const BITMAP_DEFAULT_MAP_SIZE: usize = 1 << MAP_SIZE_POW2;
+pub const BITMAP_DEFAULT_MAP_SIZE: usize = 65536;
 pub const BITMAP_DEFAULT_MINIMIZED_MAP_SIZE: usize = BITMAP_DEFAULT_MAP_SIZE / 8;
 
 lazy_static! {

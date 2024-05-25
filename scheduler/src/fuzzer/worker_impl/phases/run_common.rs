@@ -12,7 +12,6 @@ use crate::{
     source,
 };
 use anyhow::Result;
-use chrono::Local;
 use nix::sys::signal::Signal;
 
 impl FuzzingWorker {

@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Local;
 use fuzztruction_shared::mutation_cache_entry::MutationCacheEntry;
 
 use crate::{

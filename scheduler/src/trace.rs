@@ -18,27 +18,37 @@ impl Trace {
     pub fn from_trace_entries(msgs: &[TraceEntry<u64>]) -> Trace {
         let mut exec_cnt = HashMap::new();
         let mut exec_order = HashMap::new();
+        let mut skipping = 0;
 
         msgs.iter().for_each(|e| {
             if e.hits > TRACE_EXEC_CNT_LIMIT {
-                log::trace!(
-                    "Skipping PatchPoint {:?} since it has a pretty high exec cnt: {}",
-                    e.value,
-                    e.hits
-                );
+                // log::trace!(
+                //     "Skipping PatchPoint {:?} since it has a pretty high exec cnt: {}",
+                //     e.value,
+                //     e.hits
+                // );
+                skipping += 1;
                 return;
             }
             if e.order.is_none() {
-                log::trace!(
-                    "Skipping PatchPoint {:?} since it was executed but does not have an exec idx",
-                    e.value
-                );
+                // log::trace!(
+                //     "Skipping PatchPoint {:?} since it was executed but does not have an exec idx",
+                //     e.value
+                // );
+                skipping += 1;
                 return;
             }
 
             exec_cnt.insert(PatchPointID(e.value), e.hits);
             exec_order.insert(PatchPointID(e.value), e.order.unwrap().get());
         });
+
+        log::info!(
+            "Loaded {} actual patchpoints from trace entries (skipped {}, {:.2}% of the total)",
+            exec_cnt.len(),
+            skipping,
+            (skipping as f64 / msgs.len() as f64) * 100.0
+        );
 
         Trace {
             exec_cnt,

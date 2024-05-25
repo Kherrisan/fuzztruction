@@ -6,13 +6,10 @@ use fuzztruction_shared::aux_messages::AuxStreamType;
 use fuzztruction_shared::aux_stream::AuxStreamAssembler;
 use fuzztruction_shared::constants::ENV_LOG_LEVEL;
 use fuzztruction_shared::messages::{Message, MessageType, MsgHeader};
+use fuzztruction_shared::shared_memory::MmapShMem;
 use fuzztruction_shared::util::current_log_level;
 use fuzztruction_shared::util::try_get_child_exit_reason;
 use libafl::executors::ExitKind;
-use libafl_bolts::shmem::ShMem;
-use libafl_bolts::shmem::ShMemProvider;
-use libafl_bolts::shmem::UnixShMem;
-use libafl_bolts::shmem::UnixShMemProvider;
 use log::error;
 use posixmq::PosixMq;
 use rand::distributions::Alphanumeric;
@@ -122,6 +119,7 @@ pub struct AflSink {
     /// Workdir
     #[allow(unused)]
     workdir: PathBuf,
+    state_dir: PathBuf,
     /// Description of how the target binary consumes fuzzing input.
     input_channel: InputChannel,
     /// The file that is used to pass input to the target.
@@ -129,7 +127,7 @@ pub struct AflSink {
     /// The session id of the forkserver we are communicating with.
     forkserver_pid: Option<i32>,
     /// The bitmap used to compute coverage.
-    afl_map_shm: Option<UnixShMem>,
+    afl_map_shm: Option<MmapShMem>,
     /// The fd used to send data to the forkserver.
     send_fd: Option<i32>,
     /// Non blocking fd used to receive data from the forkserver.
@@ -166,35 +164,41 @@ impl AflSink {
         log_stdout: bool,
         log_stderr: bool,
     ) -> Result<AflSink> {
-        workdir.push("sink");
         let mut workdir_file_whitelist = vec![];
 
+        workdir.push("sink");
+
+        let mut state_dir = workdir.clone();
+        state_dir.push("state");
+        log::debug!("Creating state dir {:?}", &state_dir);
+        fs::create_dir_all(&state_dir)?;
+
+        workdir.push("workdir");
         // Create the file into we write inputdata before execution.
+        log::debug!("Creating workdir {:?}", &workdir);
         fs::create_dir_all(&workdir)?;
-        set_current_dir(&workdir)?;
 
         let tmpfile_path = Temp::new_file_in(&workdir).unwrap().to_path_buf();
         let mut input_file_path = String::from(tmpfile_path.to_str().unwrap());
         input_file_path.push_str("_input");
         let input_file_path = PathBuf::from(input_file_path);
 
-        let input_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&input_file_path)?;
-
-        match input_channel {
+        let input_file = match input_channel {
             InputChannel::File => {
                 if let Some(elem) = args.iter_mut().find(|e| **e == "@@") {
                     *elem = input_file_path.to_str().unwrap().to_owned();
                 } else {
                     return Err(anyhow!(format!("No @@ marker in args, even though the input channel is defined as file. args: {:#?}", args)));
                 }
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&input_file_path)?
             }
-            _ => {}
-        }
+            _ => OpenOptions::new().read(true).open("/dev/null")?,
+        };
 
         let mut rand_suffix: String = thread_rng()
             .sample_iter(&Alphanumeric)
@@ -242,6 +246,7 @@ impl AflSink {
             path,
             args,
             workdir,
+            state_dir,
             input_channel,
             input_file: (input_file, input_file_path),
             forkserver_pid: None,
@@ -268,15 +273,12 @@ impl AflSink {
     pub fn build(
         config: &Config,
         id: Option<usize>,
-        shmem_provider: &mut UnixShMemProvider,
         timeout_signal: Arc<RwLock<bool>>,
     ) -> Result<AflSink> {
         let mut sink = AflSink::from_config(config, id)?;
 
-        let shmem = shmem_provider.new_shmem(BITMAP_DEFAULT_MAP_SIZE)?;
-
         sink.timeout_signal = timeout_signal;
-        sink.afl_map_shm = Some(shmem);
+        sink.afl_map_shm = None;
 
         Ok(sink)
     }
@@ -376,8 +378,8 @@ impl AflSink {
         self.receive_fd = Some(receive_pipe[0]);
         let child_send_fd = receive_pipe[1];
 
-        let child_pid = unsafe { libc::fork() };
-        match child_pid {
+        let forkserver_pid = unsafe { libc::fork() };
+        match forkserver_pid {
             -1 => return Err(anyhow!("Fork failed!")),
             0 => {
                 /*
@@ -392,6 +394,7 @@ impl AflSink {
                 to lock the output buffer, thus using logging here is forbidden
                 and likely causes deadlocks.
                 */
+                set_current_dir(&self.workdir).expect("Failed to set workdir");
 
                 unsafe {
                     let ret = libc::setsid();
@@ -413,13 +416,6 @@ impl AflSink {
 
                 // Setup environment
                 let mut envp: Vec<CString> = Vec::new();
-                let shm_env_var = CString::new(format!(
-                    "{}={}",
-                    AFL_SHM_ENV_VAR_NAME,
-                    self.afl_map_shm.as_ref().unwrap().id()
-                ))
-                .unwrap();
-                envp.push(shm_env_var);
 
                 let env_mq_recv = CString::new(
                     format!("FT_MQ_SINK_SEND={}", self.mq_recv_name.as_str()).as_bytes(),
@@ -445,14 +441,6 @@ impl AflSink {
                             .push(CString::new(format!("{}={}", var.0, var.1).as_bytes()).unwrap())
                     })
                 }
-
-                let afl_maps_size = CString::new(format!(
-                    "__AFL_MAP_SIZE={}",
-                    self.afl_map_shm.as_ref().unwrap().len()
-                ))
-                .unwrap();
-                envp.push(afl_maps_size);
-
                 env_from_config.iter().for_each(|e| {
                     envp.push(e.to_owned());
                 });
@@ -592,11 +580,14 @@ impl AflSink {
             _ => { /* The parent */ }
         }
         /* The parent */
-        log::info!("Forkserver has pid {}", child_pid);
+        log::info!("Forkserver has pid {}", forkserver_pid);
 
         // Note th sid, thus we can kill the child later.
         // This is a sid since the child calls setsid().
-        self.forkserver_pid = Some(child_pid);
+        self.forkserver_pid = Some(forkserver_pid);
+
+        // Dump some info to state dir
+        self.dump_state_to_disk(forkserver_pid)?;
 
         // Close the pipe ends used by the child.
         unsafe {
@@ -641,6 +632,41 @@ impl AflSink {
         self.start_message_loop()?;
 
         // We are ready to fuzz!
+        Ok(())
+    }
+
+    /// Dump some information to the sink state directory.
+    fn dump_state_to_disk(&self, forkserver_pid: i32) -> Result<()> {
+        let mut path = self.state_dir.clone();
+
+        path.push("forkserver_pid");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(format!("{}", forkserver_pid).as_bytes())?;
+
+        let own_pid = unsafe { libc::getpid() };
+        let mut path = self.state_dir.clone();
+        path.push("own_pid");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(format!("{}", own_pid).as_bytes())?;
+
+        let own_tid = unsafe { libc::gettid() };
+        let mut path = self.state_dir.clone();
+        path.push("own_tid");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(format!("{}", own_tid).as_bytes())?;
+
         Ok(())
     }
 
@@ -782,6 +808,15 @@ impl AflSink {
 
         log::trace!("Got child pid {}", child_pid);
         self.child_pid = Some(child_pid);
+
+        let mut path = self.state_dir.clone();
+        path.push("child_pid");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(format!("{}", child_pid).as_bytes())?;
 
         Ok(())
     }

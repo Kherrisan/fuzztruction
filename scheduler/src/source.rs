@@ -197,7 +197,7 @@ pub struct Source {
     /// Queue used to receive message from the target agent.
     pub mq_recv: Option<PosixMq>,
     /// The PID of the target's parent (source agent).
-    pid: Option<i32>,
+    forkserver_pid: Option<i32>,
     child_pid: Option<i32>,
     timeout_signal: Arc<RwLock<bool>>,
     mem_file: Option<File>,
@@ -233,13 +233,12 @@ impl Source {
 
         let mut state_dir = workdir.clone();
         state_dir.push("state");
+        log::debug!("Creating state dir {:?}", &state_dir);
+        fs::create_dir_all(&state_dir)?;
 
         workdir.push("workdir");
         log::debug!("Creating workdir {:?}", &workdir);
         fs::create_dir_all(&workdir)?;
-
-        log::debug!("Creating state dir {:?}", &state_dir);
-        fs::create_dir_all(&state_dir)?;
 
         Source::check_link_time_deps(&path, config)?;
 
@@ -465,7 +464,7 @@ impl Source {
             mq_recv_name,
             mq_send: None,
             mq_recv: None,
-            pid: None,
+            forkserver_pid: None,
             child_pid: None,
             timeout_signal: Default::default(),
             mem_file: None,
@@ -558,12 +557,12 @@ impl Source {
             .context("Failed to create recv MQ")?;
         self.mq_recv = Some(mq_recv);
 
-        let child_pid;
+        let forkserver_pid;
         unsafe {
             log::debug!("Forking source child");
-            child_pid = libc::fork();
+            forkserver_pid = libc::fork();
 
-            match child_pid {
+            match forkserver_pid {
                 -1 => {
                     /* Error case */
                     log::error!("Failed to fork child");
@@ -776,10 +775,13 @@ impl Source {
         self.stdout_file.take();
         self.stderr_file.take();
 
-        self.pid = Some(child_pid);
+        /* The parent */
+        log::info!("Forkserver has pid {}", forkserver_pid);
+
+        self.forkserver_pid = Some(forkserver_pid);
 
         // Dump some info to state dir
-        self.dump_state_to_disk(child_pid)?;
+        self.dump_state_to_disk(forkserver_pid)?;
 
         // Wait for the handshake response.
         log::debug!("Waiting for handshake message.");
@@ -795,14 +797,14 @@ impl Source {
             OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(format!("/proc/{}/mem", child_pid))
+                .open(format!("/proc/{}/mem", forkserver_pid))
                 .context("Failed to open /proc/<x>/mem")?,
         );
 
         // Get the mapping of the target memory space.
         // NOTE: This might not include lazily loaded libraries.
         let mut mappings =
-            get_process_maps(self.pid.unwrap()).context("Failed to get process maps")?;
+            get_process_maps(self.forkserver_pid.unwrap()).context("Failed to get process maps")?;
         for map in mappings.iter_mut() {
             let pathname = map
                 .pathname
@@ -1017,7 +1019,7 @@ impl Source {
     pub fn try_get_child_exit_reason(&self) -> Option<(Option<i32>, Option<Signal>)> {
         let status: libc::c_int = 0;
         let ret = unsafe {
-            let pid = self.pid.unwrap();
+            let pid = self.forkserver_pid.unwrap();
             libc::waitpid(pid, status as *mut libc::c_int, libc::WNOHANG)
         };
         if ret > 0 {
@@ -1037,7 +1039,7 @@ impl Source {
 
     /// Stop the child process.
     pub fn stop(&mut self) -> Result<&Source, SourceError> {
-        if let Some(pid) = self.pid.take() {
+        if let Some(pid) = self.forkserver_pid.take() {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
                 // reap it
@@ -1063,14 +1065,14 @@ impl Source {
 
     /// Get the memory mappings of the child process.
     pub fn read_mapping(&mut self) -> Result<Vec<MapRange>> {
-        assert!(self.pid.is_some(), "read_mapping: Source's pid not set");
-        Ok(get_process_maps(self.pid.unwrap() as proc_maps::Pid)?)
+        assert!(self.forkserver_pid.is_some(), "read_mapping: Source's pid not set");
+        Ok(get_process_maps(self.forkserver_pid.unwrap() as proc_maps::Pid)?)
     }
 
     /// Get all memory mappings of the main executable of the child process.
     pub fn get_main_executable_mappings(&mut self) -> Result<Vec<MapRange>> {
         assert!(
-            self.pid.is_some(),
+            self.forkserver_pid.is_some(),
             "get_main_executable_mappings: Source's process not set (expected Popen)"
         );
         let path = self
@@ -1108,7 +1110,7 @@ impl Source {
 
     /// Read size bytes from address from the targets virtual address space.
     pub fn read_mem(&self, address: usize, size: usize) -> Result<Vec<u8>> {
-        let pid = self.pid.unwrap();
+        let pid = self.forkserver_pid.unwrap();
         let buf = vec![0; size];
 
         unsafe {
@@ -1332,8 +1334,17 @@ impl Source {
             .context("Failed to receive source child pid")?;
         let pid_msg = ChildPid::try_from_bytes(&buf)?;
         self.child_pid = Some(pid_msg.pid as i32);
-
         log::trace!("Got child sid: {}", self.child_pid.unwrap());
+
+        let mut path = self.state_dir.clone();
+        path.push("child_pid");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(format!("{}", self.child_pid.unwrap()).as_bytes())?;
+
 
         Ok(())
     }
@@ -1635,16 +1646,16 @@ impl Source {
     }
 
     /// Dump some information to the sources state directory.
-    fn dump_state_to_disk(&self, child_pid: i32) -> Result<()> {
+    fn dump_state_to_disk(&self, forkserver_pid: i32) -> Result<()> {
         let mut path = self.state_dir.clone();
 
-        path.push("child_pid");
+        path.push("forkserver_pid");
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&path)?;
-        file.write_all(format!("{}", child_pid).as_bytes())?;
+        file.write_all(format!("{}", forkserver_pid).as_bytes())?;
 
         let own_pid = unsafe { libc::getpid() };
         let mut path = self.state_dir.clone();

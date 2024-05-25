@@ -3,10 +3,10 @@ use core::slice;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io, mem::size_of, num::NonZeroU64};
 
-use crate::shared_memory::{MmapShMem, MmapShMemProvider};
+use crate::shared_memory::MmapShMem;
 
 pub const ENV_FT_TRACE_SHM: &str = "TRACE";
-pub const DEFAULT_TRACE_MAP_LEN: usize = 0x1000000;
+pub const DEFAULT_TRACE_MAP_LEN: usize = 0x10000;
 
 #[derive(Debug, Clone)]
 pub struct TraceMap {
@@ -53,9 +53,8 @@ impl TraceMap {
     }
 
     pub fn new(len: usize) -> Result<TraceMap> {
-        let mut shm_provider = MmapShMemProvider::new()?;
         let total_size = size_of::<TraceMapHeader>() + len * size_of::<TraceEntry<u64>>();
-        let mut shared_memory = shm_provider.new_shmem(total_size, "trace")?;
+        let mut shared_memory = MmapShMem::new_shmem(total_size, "trace")?;
         let header = TraceMapHeader::new(true, len, &mut shared_memory)?;
 
         shared_memory.write_to_env(ENV_FT_TRACE_SHM)?;
@@ -89,7 +88,7 @@ impl TraceMap {
     }
 
     pub fn from_env() -> Result<TraceMap> {
-        let mut shared_memory = match MmapShMemProvider::shmem_from_env(ENV_FT_TRACE_SHM) {
+        let mut shared_memory = match MmapShMem::shmem_from_env(ENV_FT_TRACE_SHM) {
             Ok(shm) => shm,
             Err(_) => {
                 let err = io::Error::last_os_error();

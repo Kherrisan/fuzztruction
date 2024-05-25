@@ -150,8 +150,6 @@ pub fn start_forkserver() {
         println!("fd: {fd}");
     }
 
-    // sleep(Duration::from_secs(30));
-
     let trace_map = TraceMap::from_env().expect("Failed in creating TraceMap from environments");
     let mut trace_map_guard = TRACE_MAP.lock().unwrap();
     let _ = trace_map_guard.insert(trace_map);

@@ -7,18 +7,18 @@ use libafl_bolts::{
 use libc::{c_int, munmap, shm_unlink};
 
 use anyhow::{anyhow, Result};
-
-// This is macOS's limit
-// https://stackoverflow.com/questions/38049068/osx-shm-open-returns-enametoolong
-// #[cfg(target_vendor = "apple")]
-// const MAX_MMAP_FILENAME_LEN: usize = 31;
-
-// #[cfg(not(target_vendor = "apple"))]
-// const MAX_MMAP_FILENAME_LEN: usize = 256;
+use rand::Rng;
 
 /// Mmap-based The sharedmap impl for unix using [`shm_open`] and [`mmap`].
 /// Default on `MacOS` and `iOS`, where we need a central point to unmap
 /// shared mem segments for dubious Mach kernel reasons.
+///
+/// While in libafl_bolts, MmapShMem id is derived from shm_fd,
+/// MmapShMem.write_to_env will write shm_fd to env, sharing with the child process.
+/// However, the child process will not be able to open through only the shm_fd.
+/// Because the shm_open, which is used to create and open the shm file, is setted with
+/// FD_CLOEXEC, which means the file descriptor will be closed when the process is replaced.
+/// So if the child process wants to open the shm file, it should shm_open the path of the shm file again.
 #[derive(Clone, Debug)]
 pub struct MmapShMem {
     /// The path of this shared memory segment.
@@ -31,6 +31,8 @@ pub struct MmapShMem {
     /// The file descriptor of the shmem
     shm_fd: c_int,
 }
+
+unsafe impl Send for MmapShMem {}
 
 impl MmapShMem {
     /// Create a new [`MmapShMem`]
@@ -98,55 +100,47 @@ impl MmapShMem {
     }
 
     pub fn write_to_env(&self, name: &str) -> Result<()> {
-        env::set_var(format!("ENV_PINGU_SHM_{}_PATH", name), self.path.to_owned());
+        env::set_var(format!("PINGU_SHM_{}_PATH", name), self.path.to_owned());
         env::set_var(
-            format!("ENV_PINGU_SHM_{}_SIZE", name),
+            format!("PINGU_SHM_{}_SIZE", name),
             self.map_size.to_string(),
         );
 
         Ok(())
     }
-}
 
-/// A [`ShMemProvider`] which uses `shmget`/`shmat`/`shmctl` to provide shared memory mappings.
-#[cfg(unix)]
-#[derive(Clone, Debug)]
-pub struct MmapShMemProvider {
-    rand: StdRand,
-}
-
-unsafe impl Send for MmapShMemProvider {}
-
-#[cfg(unix)]
-impl Default for MmapShMemProvider {
-    fn default() -> Self {
-        Self::new().unwrap()
-    }
-}
-
-#[cfg(unix)]
-impl MmapShMemProvider {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            rand: StdRand::new(),
-        })
-    }
-
-    pub fn new_shmem(&mut self, map_size: usize, label: &str) -> Result<MmapShMem> {
-        let id = self.rand.next() as u32;
-        let path = format!("/pingu_{label}_{id}");
+    pub fn new_shmem(map_size: usize, label: &str) -> Result<MmapShMem> {
+        let rnd_suffix: u32 = rand::thread_rng().gen();
+        let path = format!("/pingu_{label}_{rnd_suffix}");
         Ok(MmapShMem::new(path, map_size, true)?)
     }
 
     pub fn shmem_from_env(name: &str) -> Result<MmapShMem> {
-        let path = env::var(format!("ENV_PINGU_SHM_{}_PATH", name))?;
-        let size = env::var(format!("ENV_PINGU_SHM_{}_SIZE", name))?;
+        let path = env::var(format!("PINGU_SHM_{}_PATH", name))
+            .expect(format!("PINGU_SHM_{}_PATH not found", name).as_str());
+        let size = env::var(format!("PINGU_SHM_{}_SIZE", name))
+            .expect(format!("PINGU_SHM_{}_SIZE", name).as_str());
 
-        Ok(MmapShMem::new(path, size.parse()?, false)?)
+        Ok(MmapShMem::new(
+            path,
+            size.parse().expect(format!(
+                "Error in parsing PINGU_SHM_{}_SIZE: {}",
+                name, size
+            ).as_str()),
+            false,
+        )?)
     }
 }
 
 impl MmapShMem {
+    pub fn map(&self) -> *mut u8 {
+        self.map
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     pub fn size(&self) -> usize {
         self.map_size
     }
