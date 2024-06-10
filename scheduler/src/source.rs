@@ -743,7 +743,8 @@ impl Source {
                         panic!("Failed to disable ASLR");
                     }
 
-                    std::env::set_current_dir(&self.workdir).unwrap();
+                    std::env::set_current_dir(&self.config.as_ref().unwrap().sink.cwd)
+                        .expect("Failed to set workdir");
                     if let Some(ref mut jail) = self.jail {
                         // ! Make sure that the code in `enter()` is async-signal-safe since we
                         // ! are the forked child of a multithreaded application.
@@ -1065,8 +1066,13 @@ impl Source {
 
     /// Get the memory mappings of the child process.
     pub fn read_mapping(&mut self) -> Result<Vec<MapRange>> {
-        assert!(self.forkserver_pid.is_some(), "read_mapping: Source's pid not set");
-        Ok(get_process_maps(self.forkserver_pid.unwrap() as proc_maps::Pid)?)
+        assert!(
+            self.forkserver_pid.is_some(),
+            "read_mapping: Source's pid not set"
+        );
+        Ok(get_process_maps(
+            self.forkserver_pid.unwrap() as proc_maps::Pid
+        )?)
     }
 
     /// Get all memory mappings of the main executable of the child process.
@@ -1345,7 +1351,6 @@ impl Source {
             .open(&path)?;
         file.write_all(format!("{}", self.child_pid.unwrap()).as_bytes())?;
 
-
         Ok(())
     }
 
@@ -1353,7 +1358,8 @@ impl Source {
     ///
     /// # Errors
     /// All returned errors must be considered as unrecoverable fatal error.
-    pub fn run(&mut self, timeout: Duration) -> Result<RunResult> {
+    pub fn run(&mut self, timeout_remaining: Duration) -> Result<RunResult> {
+        let ts = Instant::now();
         log::debug!("Launch source message loop");
         let mut msgs = vec![];
         let mut buf: Vec<u8> = vec![0; self.mq_recv.as_ref().unwrap().attributes().max_msg_len];
@@ -1375,7 +1381,7 @@ impl Source {
             }
             drop(signal_timeout);
             // Get the next message
-            match self.receive_message(timeout, &mut buf) {
+            match self.receive_message(timeout_remaining, &mut buf) {
                 Ok(_) => (),
                 Err(err) => {
                     if !mq_timeout {
