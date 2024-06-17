@@ -143,8 +143,7 @@ pub struct AflSink {
     stderr_file: Option<(File, PathBuf)>,
     // The pid of the sink forked child process.
     child_pid: Option<i32>,
-    timeout_signal: Arc<RwLock<bool>>,
-    message_loop_handler: Arc<RwLock<bool>>,
+    stop_signal: Arc<RwLock<bool>>,
     /// Whether to log the output written to stdout. If false, the output is discarded.
     log_stdout: bool,
     /// Whether to log the output written to stderr. If false, the output is discarded.
@@ -260,8 +259,7 @@ impl AflSink {
             log_stdout,
             log_stderr,
             child_pid: None,
-            timeout_signal: Default::default(),
-            message_loop_handler: Arc::new(RwLock::new(true)),
+            stop_signal: Arc::new(RwLock::new(false)),
             stdout_file,
             stderr_file,
             config: config.cloned(),
@@ -273,11 +271,9 @@ impl AflSink {
     pub fn build(
         config: &Config,
         id: Option<usize>,
-        timeout_signal: Arc<RwLock<bool>>,
     ) -> Result<AflSink> {
         let mut sink = AflSink::from_config(config, id)?;
 
-        sink.timeout_signal = timeout_signal;
         sink.afl_map_shm = None;
 
         Ok(sink)
@@ -394,7 +390,8 @@ impl AflSink {
                 to lock the output buffer, thus using logging here is forbidden
                 and likely causes deadlocks.
                 */
-                set_current_dir(&self.workdir).expect("Failed to set workdir");
+                set_current_dir(&self.config.as_ref().unwrap().sink.cwd)
+                    .expect("Failed to set workdir");
 
                 unsafe {
                     let ret = libc::setsid();
@@ -671,17 +668,17 @@ impl AflSink {
     }
 
     fn start_message_loop(&mut self) -> Result<()> {
-        let handler = self.message_loop_handler.clone();
+        let stop_signal = self.stop_signal.clone();
         let mq_recv = self.mq_recv.take().unwrap();
         let _: JoinHandle<Result<()>> = thread::spawn(move || {
             let mut assembler = AuxStreamAssembler::new();
             let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
             loop {
-                let h = handler.read().map_err(|e| anyhow!(e.to_string()))?;
-                if !*h {
-                    break;
+                if let Ok(timeout) = stop_signal.read() {
+                    if *timeout {
+                        break;
+                    }
                 }
-                drop(h);
                 match mq_recv.receive_timeout(&mut buf, DEFAULT_SINK_RECEIVE_TIMEOUT) {
                     Ok(_) => {
                         log::trace!("Received message from sink");
@@ -738,8 +735,9 @@ impl AflSink {
     /// Stops the forksever. Must be called before calling start() again.
     /// It is save to call this function multiple times.
     pub fn stop(&mut self) {
-        let mut h = self.message_loop_handler.write().unwrap();
-        *h = false;
+        if let Ok(mut timeout) = self.stop_signal.write() {
+            *timeout = true;
+        }
         if let Some(sid) = self.forkserver_pid.take() {
             unsafe {
                 libc::close(self.send_fd.unwrap());

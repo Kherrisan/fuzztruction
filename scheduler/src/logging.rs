@@ -88,7 +88,6 @@ fn panic_hook(info: &panic::PanicInfo<'_>) {
         let line = location.line();
         log::error!("{}", Red.paint(format!("Location: {}:{}", file, line)));
     }
-    process::abort();
 }
 
 pub fn setup_panic_logging() {

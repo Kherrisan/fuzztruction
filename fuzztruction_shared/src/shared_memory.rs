@@ -6,7 +6,7 @@ use libafl_bolts::{
 };
 use libc::{c_int, munmap, shm_unlink};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use rand::Rng;
 
 /// Mmap-based The sharedmap impl for unix using [`shm_open`] and [`mmap`].
@@ -117,16 +117,16 @@ impl MmapShMem {
 
     pub fn shmem_from_env(name: &str) -> Result<MmapShMem> {
         let path = env::var(format!("PINGU_SHM_{}_PATH", name))
-            .expect(format!("PINGU_SHM_{}_PATH not found", name).as_str());
+            .context(format!("PINGU_SHM_{}_PATH not found", name))?;
         let size = env::var(format!("PINGU_SHM_{}_SIZE", name))
-            .expect(format!("PINGU_SHM_{}_SIZE", name).as_str());
+            .context(format!("PINGU_SHM_{}_SIZE", name))?;
 
         Ok(MmapShMem::new(
             path,
-            size.parse().expect(format!(
+            size.parse().context(format!(
                 "Error in parsing PINGU_SHM_{}_SIZE: {}",
                 name, size
-            ).as_str()),
+            ))?,
             false,
         )?)
     }

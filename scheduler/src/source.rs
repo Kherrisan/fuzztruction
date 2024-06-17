@@ -61,7 +61,7 @@ use crate::{mutation_cache::MutationCache, patchpoint::PatchPoint};
 use crate::io_channels::*;
 
 const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_secs(120);
-const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
+
 const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(not(feature = "never-timeout"))]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,6 +69,11 @@ const MAX_OUTPUT_SIZE: u64 = n_mib_bytes!(1) as u64;
 
 #[cfg(feature = "never-timeout")]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3600 * 24);
+
+#[cfg(not(feature = "never-timeout"))]
+const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(10);
+#[cfg(feature = "never-timeout")]
+const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 lazy_static! {
     /// Mapping of (binary path, Child PID) to patch point collection if they
@@ -197,9 +202,8 @@ pub struct Source {
     /// Queue used to receive message from the target agent.
     pub mq_recv: Option<PosixMq>,
     /// The PID of the target's parent (source agent).
-    forkserver_pid: Option<i32>,
+    pub forkserver_pid: Option<i32>,
     child_pid: Option<i32>,
-    timeout_signal: Arc<RwLock<bool>>,
     mem_file: Option<File>,
     log_stdout: bool,
     log_stderr: bool,
@@ -466,7 +470,6 @@ impl Source {
             mq_recv: None,
             forkserver_pid: None,
             child_pid: None,
-            timeout_signal: Default::default(),
             mem_file: None,
             log_stdout,
             log_stderr,
@@ -510,10 +513,8 @@ impl Source {
     pub fn build(
         config: &Config,
         id: Option<usize>,
-        timeout_signal: Arc<RwLock<bool>>,
     ) -> Result<Source> {
-        let mut source = Source::from_config(config, id)?;
-        source.timeout_signal = timeout_signal;
+        let source = Source::from_config(config, id)?;
 
         Ok(source)
     }
@@ -864,7 +865,7 @@ impl Source {
 
         let removed_cnt = old_size - patch_points.len();
         if removed_cnt > 0 {
-            log::warn!("Removed {} patch points during filtering.", removed_cnt);
+            log::warn!("Removed {} patch points during filtering duplicated vmas.", removed_cnt);
         }
     }
 
@@ -964,7 +965,9 @@ impl Source {
             }
         }
         assert_eq!(PATCH_POINT_SIZE, 32);
-        let nop_pattern = b"\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x66\x90";
+        // let nop_pattern = b"\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x66\x90";
+        // The new 32-bytes nop pattern is seen in the patched point.
+        let nop_pattern = b"\x66\x66\x66\x66\x66\x2e\x66\x0f\x1f\x84\x00\x00\x02\x00\x00\x66\x66\x66\x66\x66\x2e\x66\x0f\x1f\x84\x00\x00\x02\x00\x00\x66\x90";
         patch_points.retain(|p| {
             let content = self.read_mem(p.vma() as usize, nop_pattern.len());
             if let Ok(content) = content {
@@ -1359,33 +1362,40 @@ impl Source {
     /// # Errors
     /// All returned errors must be considered as unrecoverable fatal error.
     pub fn run(&mut self, timeout_remaining: Duration) -> Result<RunResult> {
-        let ts = Instant::now();
+        let mut ts = Instant::now();
+        let mut timeout_remaining = timeout_remaining;
         log::debug!("Launch source message loop");
         let mut msgs = vec![];
         let mut buf: Vec<u8> = vec![0; self.mq_recv.as_ref().unwrap().attributes().max_msg_len];
 
-        let mut mq_timeout = false;
+        let mut terminating = false;
         let mut kill_child_ret = Ok(());
 
         // Wait for reply
         loop {
-            let signal_timeout = self
-                .timeout_signal
-                .read()
-                .expect("Failed to get read lock of the timeout_signal rwlock");
-            if *signal_timeout && !mq_timeout {
-                mq_timeout = true;
-                log::trace!("Due to timeout_signal, manually killing the child.");
+            timeout_remaining = timeout_remaining.saturating_sub(ts.elapsed());
+            if timeout_remaining <= Duration::ZERO && !terminating {
+                terminating = true;
+                // The child did not terminated in time
+                log::trace!(
+                        "There is no time remaining for the source running. Manually killing the child."
+                    );
                 let pid_msg = ChildPid::new(self.child_pid.unwrap() as u64);
                 kill_child_ret = kill_child_process_group(&pid_msg);
+                continue;
             }
-            drop(signal_timeout);
+            ts = Instant::now();
             // Get the next message
-            match self.receive_message(timeout_remaining, &mut buf) {
+            let recv_timeout = if terminating {
+                DEFAULT_RECEIVE_TIMEOUT
+            } else {
+                timeout_remaining
+            };
+            match self.receive_message(recv_timeout, &mut buf) {
                 Ok(_) => (),
                 Err(err) => {
-                    if !mq_timeout {
-                        mq_timeout = true;
+                    if !terminating {
+                        terminating = true;
                         // The child did not terminated in time
                         log::trace!(
                             "Did not receive any response in time. Manually killing the child."
@@ -1418,7 +1428,7 @@ impl Source {
                     let msg = TerminatedMessage::try_from_bytes(&buf)?;
                     let exit_code = msg.exit_code;
                     log::trace!("Received MsgIdTerminated message.");
-                    if mq_timeout {
+                    if terminating {
                         log::trace!("Child was killed by us, acknowledgement received");
                         return Ok(RunResult::TimedOut { msgs });
                     } else if exit_code >= 0 {

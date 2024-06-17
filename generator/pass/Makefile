@@ -1,11 +1,11 @@
 #We only support clang, so we fix this variable!
-BASE = /home/ubuntu/llvm-ft/build
+BASE = /data/exp/dkzou/llvm-17.0.6-ft/build
 CC = $(BASE)/bin/clang
 CXX = $(BASE)/bin/clang++
 AR = $(BASE)/bin/llvm-ar
 
-CFLAGS      ?= -O3 -funroll-loops -g -Wall -Wno-pointer-sign
-CXXFLAGS    ?= -O3 -funroll-loops -g -Wall
+CFLAGS      ?= -O0 -funroll-loops -g3 -Wall -Wno-pointer-sign
+CXXFLAGS    ?= -O0 -funroll-loops -g3 -Wall
 
 # Used for llvm pass compilation
 LLVM_CONFIG ?= $(BASE)/bin/llvm-config
@@ -35,7 +35,7 @@ fuzztruction-source-clang-fast++: fuzztruction-source-clang-fast
 
 # Replacement for common mem related function like memcpy, memmove,...
 mem_functions.ll: mem_functions.c fuzztruction-source-clang-fast
-	$(CC) -fno-builtin-memcpy -fno-builtin-memcpy -fno-builtin-memmove -O0 -S -emit-llvm $<
+	$(CC) -fno-builtin-memcpy -fno-builtin-memcpy -fno-builtin-memmove -fno-discard-value-names -O0 -S -emit-llvm $<
 
 install: all
 	install -m 755 fuzztruction-source-clang-fast fuzztruction-source-clang-fast++ /usr/bin

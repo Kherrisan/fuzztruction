@@ -15,24 +15,26 @@ pass.
 #include "debug.h"
 #include <assert.h>
 
-typedef uint8_t  u8;
+typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-typedef struct {
+typedef struct
+{
     bool is_cxx;
     bool is_64bit;
     bool x_set;
     bool o_set;
 } arg_settings_t;
 
-typedef struct {
+typedef struct
+{
     char const **argv;
     int argc;
 } args_t;
 
-const char* PASS_SO_NAME = "fuzztruction-source-llvm-pass.so";
+const char *PASS_SO_NAME = "fuzztruction-source-llvm-pass.so";
 char *pass_path;
 
 void find_pass()
@@ -41,12 +43,14 @@ void find_pass()
     char *cwd;
 
     cwd = getcwd(NULL, 0);
-    if (!cwd) {
+    if (!cwd)
+    {
         PFATAL("Failed to get CWD");
     }
 
     /* Test if we find it in the cwd  */
-    if (asprintf(&guess, "%s/%s", cwd, PASS_SO_NAME) < 0) {
+    if (asprintf(&guess, "%s/%s", cwd, PASS_SO_NAME) < 0)
+    {
         free(cwd);
         PFATAL("Failed to allocate");
     }
@@ -55,50 +59,57 @@ void find_pass()
 
     free(cwd);
 
-    if (!pass_path) {
+    if (!pass_path)
+    {
         free(pass_path);
         pass_path = NULL;
-    } else {
+    }
+    else
+    {
         goto done;
     }
 
     // FIXME: this path should not be absolute.
-    if (asprintf(&guess, "/home/ubuntu/pingu/fuzztruction/generator/pass/%s", PASS_SO_NAME) < 0) {
+    if (asprintf(&guess, "/home/ubuntu/pingu/fuzztruction/generator/pass/%s", PASS_SO_NAME) < 0)
+    {
         PFATAL("Failed to allocate");
     }
     if (!access(guess, R_OK))
         pass_path = guess;
 
-    done:
+done:
 
-    if (!pass_path) {
+    if (!pass_path)
+    {
         free(pass_path);
         FATAL("Failed to find %s\n", PASS_SO_NAME);
     }
 }
 
-arg_settings_t* parse_argv(char const *argv[], int argc) {
-    arg_settings_t* self = malloc(sizeof(*self));
+arg_settings_t *parse_argv(char const *argv[], int argc)
+{
+    arg_settings_t *self = malloc(sizeof(*self));
     if (!self)
         PFATAL("Error during malloc");
 
     memset(self, 0x00, sizeof(*self));
 
-
-    char* argv0 = strdup(argv[0]);
+    char *argv0 = strdup(argv[0]);
     if (!argv0)
         PFATAL("Error durring alloc");
 
     /* name points into argv0 */
-    char* name = basename(argv0);
-    if(!strcmp(name, "fuzztruction-source-clang-fast++")) {
-        //printf("#fuzztruction-source-clang-fast++ was called\n");
+    char *name = basename(argv0);
+    if (!strcmp(name, "fuzztruction-source-clang-fast++"))
+    {
+        // printf("#fuzztruction-source-clang-fast++ was called\n");
         self->is_cxx = true;
     }
     free(argv0);
 
-    while(argc--) {
-        const char* cur = *(argv++);
+    while (argc--)
+    {
+        const char *cur = *(argv++);
 
         if (!strcmp(cur, "-m32"))
             self->is_64bit = false;
@@ -113,14 +124,15 @@ arg_settings_t* parse_argv(char const *argv[], int argc) {
     return self;
 }
 
-args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings) {
+args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
+{
     const int max_args = argc + 64;
-    args_t* self = malloc(sizeof(*self));
+    args_t *self = malloc(sizeof(*self));
     self->argc = 0;
     self->argv = malloc(sizeof(*self->argv) * max_args);
 
     /* Inject/Replace arguments */
-    self->argv[self->argc++] = arg_settings->is_cxx ? "/home/ubuntu/llvm-ft/build/bin/clang++" : "/home/ubuntu/llvm-ft/build/bin/clang";
+    self->argv[self->argc++] = arg_settings->is_cxx ? "/data/exp/dkzou/llvm-17.0.6-ft/build/bin/clang++" : "/data/exp/dkzou/llvm-17.0.6-ft/build/bin/clang";
     // self->argv[self->argc++] = arg_settings->is_cxx ? "clang++" : "clang";
     // Ignore unkown args
     self->argv[self->argc++] = "-Qunused-arguments";
@@ -132,20 +144,23 @@ args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings)
     self->argv[self->argc++] = "-fno-slp-vectorize";
     self->argv[self->argc++] = "-fno-vectorize";
 
-    //self->argv[self->argc++] = "-mno-sse2";
+    // self->argv[self->argc++] = "-mno-sse2";
     self->argv[self->argc++] = "-mno-avx";
 
     // Run our pass
+    char *pass_plugin_arg = malloc(strlen(pass_path) + 64);
+    sprintf(pass_plugin_arg, "-fpass-plugin=%s", pass_path);
     self->argv[self->argc++] = "-Xclang";
-    self->argv[self->argc++] = "-load";
-    self->argv[self->argc++] = "-Xclang";
-    self->argv[self->argc++] = pass_path;
+    self->argv[self->argc++] = pass_plugin_arg;
 
+    self->argv[self->argc++] = "-fno-discard-value-names";
 
     /* Process initially passed arguments and potentially drop some of these */
-    const char** current = &argv[1];
-    while(*current) {
-        if (!strcmp(*current, "-Wl,-z,defs") || !strcmp(*current, "-Wl,--no-undefined")) {
+    const char **current = &argv[1];
+    while (*current)
+    {
+        if (!strcmp(*current, "-Wl,-z,defs") || !strcmp(*current, "-Wl,--no-undefined"))
+        {
             current++;
             continue;
         }
@@ -167,10 +182,11 @@ args_t* rewrite_argv(const char *argv[], int argc, arg_settings_t* arg_settings)
 
 int main(int argc, char const *argv[])
 {
-    arg_settings_t* arg_settings;
-    args_t* new_args;
+    arg_settings_t *arg_settings;
+    args_t *new_args;
 
-    if (argc < 2) {
+    if (argc < 2)
+    {
         FATAL("Not enough arguments");
     }
 
@@ -193,7 +209,7 @@ int main(int argc, char const *argv[])
     // }
     // fflush(NULL);
 
-    execvp(new_args->argv[0], (char**)new_args->argv);
+    execvp(new_args->argv[0], (char **)new_args->argv);
 
     PFATAL("Failed to execute %s\n", new_args->argv[0]);
 

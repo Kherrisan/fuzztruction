@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use core::slice;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, io, mem::size_of, num::NonZeroU64};
+use std::{collections::HashSet, ffi::CString, io, mem::size_of, num::NonZeroU64};
 
 use crate::shared_memory::MmapShMem;
 
@@ -198,6 +198,13 @@ impl TraceMap {
 
     pub fn capacity(&self) -> usize {
         self.header().capacity
+    }
+
+    pub fn unlink(&self) {
+        unsafe {
+            let cname = CString::new(self._shared_memory.path()).unwrap();
+            libc::shm_unlink(cname.as_ptr());
+        }
     }
 }
 

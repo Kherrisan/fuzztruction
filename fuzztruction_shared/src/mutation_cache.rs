@@ -294,7 +294,9 @@ impl MutationCache {
 
         assert!(size > std::mem::size_of::<MutationCacheContent>());
         let mut memory = util::alloc_box_aligned_zeroed::<MutationCacheContent>(size);
-
+        unsafe {
+            std::ptr::write_bytes(memory.as_mut() as *mut MutationCacheContent, 0, 1);
+        }
         let mutation_cache_content =
             unsafe { &mut *(memory.as_mut() as *mut MutationCacheContent) };
         mutation_cache_content.init(size);

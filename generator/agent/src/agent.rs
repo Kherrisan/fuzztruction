@@ -150,10 +150,16 @@ pub fn start_forkserver() {
         println!("fd: {fd}");
     }
 
-    let trace_map = TraceMap::from_env().expect("Failed in creating TraceMap from environments");
-    let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-    let _ = trace_map_guard.insert(trace_map);
-    drop(trace_map_guard);
+    match TraceMap::from_env() {
+        Ok(trace_map) => {
+            let mut trace_map_guard = TRACE_MAP.lock().unwrap();
+            trace_map.unlink();
+            let _ = trace_map_guard.insert(trace_map);
+        }
+        Err(e) => {
+            log::error!("Failed to create TraceMap from environments: {:?}", e);
+        }
+    };
 
     update_proc_mappings();
 
@@ -210,8 +216,13 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
 
     // Reset the trace maps state thus we can register new mutation entries
     // for tracing if any entry requests tracing below.
+
     let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-    trace_map_guard.as_mut().unwrap().clear();
+    if let Some(trace_map) = trace_map_guard.as_mut() {
+        trace_map.clear();
+    } else {
+        log::error!("TRACE_MAP is not initialized!")
+    }
     drop(trace_map_guard);
 
     // We are about to reset all patch points -> make them writeable.
@@ -394,7 +405,7 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
 fn process_messages() {
     let mut agent = Agent::new();
 
-    info!("Ready to receive orders. Starting main loop.");
+    debug!("Ready to receive orders. Starting main loop.");
     loop {
         let new_msg = recv_message(DEFAULT_TIMEOUT_MS);
         let new_msg = new_msg.expect("Failed to receive message from parent.");
