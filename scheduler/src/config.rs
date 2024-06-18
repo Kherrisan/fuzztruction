@@ -54,6 +54,7 @@ pub struct SourceConfig {
     /// Path to the Source binary.
     pub bin_path: PathBuf,
     pub arguments: Vec<String>,
+    pub cwd: PathBuf,
     /// Type of input consumed by the Source binary.
     pub input_type: InputChannel,
     /// Type of output produced by the Source binary.
@@ -186,6 +187,7 @@ pub struct SinkConfig {
     /// Path to the Sink binary.
     pub bin_path: PathBuf,
     pub arguments: Vec<String>,
+    pub cwd: PathBuf,
     /// Type of input consumed by the Sink binary.
     pub input_type: InputChannel,
     /// Type of output produced by the Sink binary.
@@ -231,7 +233,7 @@ pub struct GeneralConfig {
     pub mitm_port: u16,
     pub target_port: u16,
     pub mitm_buf_size: Option<usize>,
-    pub max_interactions: Option<u16>
+    pub max_interactions: Option<u16>,
 }
 
 impl GeneralConfig {
@@ -586,6 +588,7 @@ impl TryFromYaml for InputChannel {
             "none" => Ok(Box::new(InputChannel::None)),
             "stdin" => Ok(Box::new(InputChannel::Stdin)),
             "file" => Ok(Box::new(InputChannel::File)),
+            "socket" => Ok(Box::new(InputChannel::Socket)),
             _ => Err(ConfigError::InvalidValue(ret)),
         }
         .context("Must be one of None, Stdin or File".to_owned())?;
@@ -602,6 +605,7 @@ impl TryFromYaml for OutputChannel {
             "none" => Ok(Box::new(OutputChannel::None)),
             "stdout" => Ok(Box::new(OutputChannel::Stdout)),
             "file" => Ok(Box::new(OutputChannel::File)),
+            "socket" => Ok(Box::new(OutputChannel::Socket)),
             _ => Err(ConfigError::InvalidValue(ret)),
         }
         .context("Must be one of None, Stdout or File".to_owned())?;
@@ -740,10 +744,11 @@ impl ConfigBuilder {
         let input_dir = self.get_attribute(yaml, "input-directory")?;
         let timeout: Option<Duration> = self.get_attribute(yaml, "timeout")?;
         let timeout = timeout.unwrap_or_else(|| Duration::from_millis(40));
+        let tracing_timeout = timeout.clone();
         let jail_uid = self.get_attribute(yaml, "jail-uid")?;
         let jail_gid = self.get_attribute(yaml, "jail-gid")?;
-        let socket_host = self.get_attribute(yaml, "socket-host")?;
-        let socket_port = self.get_attribute(yaml, "socket-port")?;
+        let mitm_port = self.get_attribute(yaml, "mitm-port")?;
+        let target_port = self.get_attribute(yaml, "target-port")?;
 
         match (jail_uid, jail_gid) {
             (Some(..), Some(..)) => (),
@@ -759,6 +764,8 @@ impl ConfigBuilder {
                 "timeout",
                 "jail-uid",
                 "jail-gid",
+                "mitm-port",
+                "target-port",
                 "sink",
                 "afl++",
                 "source",
@@ -772,14 +779,14 @@ impl ConfigBuilder {
             work_dir,
             input_dir,
             timeout,
-            tracing_timeout: Duration::from_secs(120),
+            tracing_timeout,
             purge_workdir: false,
             jail_uid,
             jail_gid,
-            mitm_port: socket_host,
-            target_port: socket_port,
+            mitm_port,
+            target_port,
             mitm_buf_size: None,
-            max_interactions: None
+            max_interactions: None,
         })
     }
 
@@ -788,6 +795,7 @@ impl ConfigBuilder {
         let env = env.unwrap_or_default();
         let bin_path = self.get_attribute(yaml, "bin-path")?;
         let arguments = self.get_attribute(yaml, "arguments")?;
+        let cwd = self.get_attribute(yaml, "cwd")?;
         let input_type = self.get_attribute(yaml, "input-type")?;
         let output_type = self.get_attribute(yaml, "output-type")?;
         let output_suffix = self.get_attribute(yaml, "output-suffix")?;
@@ -800,6 +808,7 @@ impl ConfigBuilder {
                 "env",
                 "bin-path",
                 "arguments",
+                "cwd",
                 "input-type",
                 "output-type",
                 "output-suffix",
@@ -812,6 +821,7 @@ impl ConfigBuilder {
             env,
             bin_path,
             arguments,
+            cwd,
             input_type,
             output_type,
             output_suffix,
@@ -917,29 +927,37 @@ impl ConfigBuilder {
         let generation_ceiling: Option<u32> =
             self.get_attribute(phases_section, "generation-ceiling")?;
 
-        let section = self.get_section(phases_section, "discovery")?;
-        let discovery_config = self
-            .parse_discovery_phase_section(&section)
-            .context("Failed to parse discovery section")
-            .unwrap_or_default();
+        let discovery_config = if let Ok(section) = self.get_section(phases_section, "discovery") {
+            self.parse_discovery_phase_section(&section)
+                .context("Failed to parse discovery section")
+                .unwrap_or_default()
+        } else {
+            DiscoveryPhaseConfig::default()
+        };
 
-        let section = self.get_section(phases_section, "mutate")?;
-        let mutate_config = self
-            .parse_mutate_phase_section(&section)
-            .context("Failed to parse mutate section")
-            .unwrap_or_default();
+        let mutate_config = if let Ok(section) = self.get_section(phases_section, "mutate") {
+            self.parse_mutate_phase_section(&section)
+                .context("Failed to parse mutate section")
+                .unwrap_or_default()
+        } else {
+            MutatePhaseConfig::default()
+        };
 
-        let section = self.get_section(phases_section, "add")?;
-        let add_config = self
-            .parse_add_phase_section(&section)
-            .context("Failed to parse add section")
-            .unwrap_or_default();
+        let add_config = if let Ok(section) = self.get_section(phases_section, "add") {
+            self.parse_add_phase_section(&section)
+                .context("Failed to parse add section")
+                .unwrap_or_default()
+        } else {
+            AddPhaseConfig::default()
+        };
 
-        let section = self.get_section(phases_section, "combine")?;
-        let combine_config = self
-            .parse_combine_phase_section(&section)
-            .context("Failed to parse combine section")
-            .unwrap_or_default();
+        let combine_config = if let Ok(section) = self.get_section(phases_section, "combine") {
+            self.parse_combine_phase_section(&section)
+                .context("Failed to parse combine section")
+                .unwrap_or_default()
+        } else {
+            CombinePhaseConfig::default()
+        };
 
         ConfigBuilder::check_for_unparsed_keys(
             phases_section,
@@ -974,6 +992,7 @@ impl ConfigBuilder {
         let env = env.unwrap_or_default();
         let bin_path = self.get_attribute(yaml, "bin-path")?;
         let arguments = self.get_attribute(yaml, "arguments")?;
+        let cwd = self.get_attribute(yaml, "cwd")?;
         let input_type = self.get_attribute(yaml, "input-type")?;
         let output_type = self.get_attribute(yaml, "output-type")?;
         let log_stdout = self.get_attribute(yaml, "log-stdout")?;
@@ -986,6 +1005,7 @@ impl ConfigBuilder {
                 "env",
                 "bin-path",
                 "arguments",
+                "cwd",
                 "input-type",
                 "output-type",
                 "log-stdout",
@@ -997,6 +1017,7 @@ impl ConfigBuilder {
         Ok(SinkConfig {
             bin_path,
             arguments,
+            cwd,
             input_type,
             output_type,
             log_stdout,
@@ -1068,20 +1089,6 @@ impl ConfigBuilder {
         }
         let sink_config = self.parse_sink_section(sink_section)?;
 
-        let afl_plus_plus_section = &yaml["afl++"];
-        let afl_plus_plus_config = if afl_plus_plus_section.is_badvalue() {
-            None
-        } else {
-            Some(self.parse_afl_plus_section(afl_plus_plus_section)?)
-        };
-
-        let symcc_section = &yaml["symcc"];
-        let symcc_section = if symcc_section.is_badvalue() {
-            None
-        } else {
-            Some(self.parse_symcc_section(symcc_section)?)
-        };
-
         let vanilla_section = &yaml["vanilla"];
         if vanilla_section.is_badvalue() {
             return Err(ConfigError::MissingSection("vanilla".to_owned()).into());
@@ -1094,8 +1101,8 @@ impl ConfigBuilder {
             source: source_config,
             phases: phase_config,
             sink: sink_config,
-            aflpp: afl_plus_plus_config,
-            symcc: symcc_section,
+            aflpp: None,
+            symcc: None,
             vanilla: vanilla_config,
         };
         config.validate()?;

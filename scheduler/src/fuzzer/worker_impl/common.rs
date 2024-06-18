@@ -63,10 +63,10 @@ impl FuzzingWorker {
         digest.update(sink_input);
         let sha256_digest: String = digest.finalize().encode_hex();
         let stats_lock = self.stats.lock().unwrap();
-        let ts = stats_lock.init_ts;
+        let dt = stats_lock.init_dt.unwrap();
         let filename = format!(
             "ts:{}+hash:{}",
-            ts.unwrap().elapsed().as_millis(),
+            dt.elapsed().as_millis(),
             sha256_digest
         );
 

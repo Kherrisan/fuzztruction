@@ -1,3 +1,4 @@
+use log::kv::ToKey;
 use serde::{Deserialize, Serialize};
 use std::panic;
 
@@ -45,6 +46,9 @@ pub struct LogRecordWrapper {
     pub module_path: Option<String>,
     pub file: Option<String>,
     pub line: Option<u32>,
+    pub tid: Option<i32>,
+    pub time: Option<String>,
+    pub log_source: Option<String>,
 }
 
 impl LogRecordWrapper {
@@ -56,6 +60,18 @@ impl LogRecordWrapper {
             module_path: record.module_path().map(|e| e.to_owned()),
             file: record.file().map(|e| e.to_owned()),
             line: record.line(),
+            tid: record
+                .key_values()
+                .get("tid".to_key())
+                .map(|e| e.to_string().parse().unwrap()),
+            time: record
+                .key_values()
+                .get("time".to_key())
+                .map(|e| e.to_string()),
+            log_source: record
+                .key_values()
+                .get("log_source".to_key())
+                .map(|e| e.to_string()),
         }
     }
 }

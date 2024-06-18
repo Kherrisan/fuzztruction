@@ -83,7 +83,7 @@ fn check_if_agent_is_in_path() -> Result<()> {
 pub fn check_system() -> Result<()> {
     check_core_pattern_is_core()?;
     check_fs_suid_dumpable()?;
-    check_if_tmp_is_tmpfs()?;
+    // check_if_tmp_is_tmpfs()?;
     check_if_agent_is_in_path()?;
     Ok(())
 }

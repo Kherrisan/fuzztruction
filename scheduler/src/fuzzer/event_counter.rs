@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Borrow,
     iter::Sum,
@@ -5,17 +6,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fuzztruction_shared::util::ExpectNone;
+use fuzztruction_shared::{serializer::option_instant_serializer, util::ExpectNone};
 
 /// Different mercies used to describe the performance of a fuzzer.
-#[derive(Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct FuzzerEventCounter {
     /// The timestamps of when the init() was called.
-    pub init_ts: Option<Instant>,
+    #[serde(with = "option_instant_serializer")]
+    pub init_dt: Option<Instant>,
     /// Timestamp of the last path found in the sink.
-    pub last_finding_ts: Option<Instant>,
+    #[serde(with = "option_instant_serializer")]
+    pub last_finding_dt: Option<Instant>,
     /// Timestamp of the last sink crash.
-    pub last_crash_ts: Option<Instant>,
+    #[serde(with = "option_instant_serializer")]
+    pub last_crash_dt: Option<Instant>,
     /// Number of execution.
     pub execs: u64,
     /// Number of times the source execution did not end in a timeout or crash.
@@ -42,6 +46,10 @@ pub struct FuzzerEventCounter {
     pub sink_unique_crashes: u64,
 }
 
+libafl_bolts::impl_serdeany!(FuzzerEventCounter);
+
+impl FuzzerEventCounter {}
+
 impl std::fmt::Debug for FuzzerEventCounter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let rel_to_execs = |val: u64| -> String {
@@ -50,16 +58,16 @@ impl std::fmt::Debug for FuzzerEventCounter {
         };
 
         f.debug_struct("FuzzerStats")
-            .field("init_ts", &self.init_ts)
-            .field("last_finding_ts", &self.last_finding_ts)
+            .field("init_ts", &self.init_dt)
+            .field("last_finding_ts", &self.last_finding_dt)
             .field(
                 "since_last_finding()",
-                &self.last_finding_ts.map(|ts| ts.elapsed()),
+                &self.last_finding_dt.map(|dt| dt.elapsed()),
             )
-            .field("last_crash_ts", &self.last_crash_ts)
+            .field("last_crash_ts", &self.last_crash_dt)
             .field(
                 "since_last_crash()",
-                &self.last_crash_ts.map(|ts| ts.elapsed()),
+                &self.last_crash_dt.map(|dt| dt.elapsed()),
             )
             .field("execs", &rel_to_execs(self.execs))
             .field(
@@ -90,7 +98,7 @@ impl FuzzerEventCounter {
     /// Initialize timestamps used for stats generation.
     /// This must be called for some function to work properly.
     pub fn init(&mut self) {
-        self.init_ts
+        self.init_dt
             .replace(Instant::now())
             .expect_none("Called start() twice");
     }
@@ -99,7 +107,7 @@ impl FuzzerEventCounter {
     /// started.
     /// NOTE: [init] must have been called for this function to return Some.
     pub fn runtime(&self) -> Option<Duration> {
-        self.init_ts.map(|ts| ts.elapsed())
+        self.init_dt.map(|dt| dt.elapsed())
     }
 
     /// The averaged executions per second so far.
@@ -117,9 +125,9 @@ impl FuzzerEventCounter {
     }
 
     pub fn time_since_last_new_path_or_crash(&self) -> Option<Duration> {
-        let last_path = vec![self.last_finding_ts, self.last_crash_ts];
+        let last_path = vec![self.last_finding_dt, self.last_crash_dt];
         match last_path.iter().filter(|ts| ts.is_some()).max() {
-            Some(Some(ts)) => Some(ts.elapsed()),
+            Some(Some(dt)) => Some(dt.elapsed()),
             _ => None,
         }
     }
@@ -216,13 +224,13 @@ impl Sum for FuzzerEventCounter {
             res += &e;
             // The resulting FuzzerStats will have the timestamp
             // of the oldest FuzzerStats thingy we are summing up.
-            if let Some(ts) = e.init_ts {
-                if let Some(res_ts) = res.init_ts.as_mut() {
+            if let Some(ts) = e.init_dt {
+                if let Some(res_ts) = res.init_dt.as_mut() {
                     if *res_ts < ts {
                         *res_ts = ts;
                     }
                 } else {
-                    res.init_ts = Some(ts);
+                    res.init_dt = Some(ts);
                 }
             }
         }

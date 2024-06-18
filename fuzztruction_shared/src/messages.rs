@@ -213,7 +213,7 @@ impl Message for MsgHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct HelloMessage {
     header: MsgHeader,
@@ -250,7 +250,7 @@ impl Message for HelloMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct RunMessage {
     header: MsgHeader,
@@ -281,7 +281,7 @@ impl Message for RunMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct TerminatedMessage {
     header: MsgHeader,
@@ -307,7 +307,7 @@ impl Message for TerminatedMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ShutdownMessage {
     header: MsgHeader,
@@ -373,7 +373,7 @@ impl Message for TracePointStat {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct SyncMutations {
     header: MsgHeader,
@@ -431,7 +431,7 @@ impl Message for KeepAlive {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Ok {
     header: MsgHeader,
@@ -460,7 +460,7 @@ impl Message for Ok {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ChildPid {
     header: MsgHeader,
@@ -493,7 +493,7 @@ impl Message for ChildPid {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ReceivableMessages {
     HelloMessage(HelloMessage),
     RunMessage(RunMessage),

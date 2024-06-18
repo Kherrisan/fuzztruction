@@ -1,11 +1,13 @@
 #pragma once
 
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
+
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/InstrTypes.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -43,17 +45,10 @@
 
 using namespace llvm;
 
-
-class FuzztructionSourcePreprocesssingPass : public ModulePass {
-
+class FuzztructionSourcePreprocesssingPass : public PassInfoMixin<FuzztructionSourcePreprocesssingPass>
+{
 public:
-    char ID = 0;
-    FuzztructionSourcePreprocesssingPass() : ModulePass(ID) { }
+    PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
+
     bool replaceMemFunctions(Module &M);
-    bool runOnModule(Module &M) override;
-
-    StringRef getPassName() const override {
-        return "FuzzTruction Source Preporcessing Pass";
-    }
-
 };

@@ -1,5 +1,5 @@
-use fuzztruction_shared::iosync_channel::IOSyncChannel;
 use fuzztruction_shared::messages;
+use fuzztruction_shared::tracing::TraceMap;
 use fuzztruction_shared::{
     communication_channel::{CommunicationChannel, CommunicationChannelError},
     constants::ENV_LOG_LEVEL,
@@ -14,6 +14,8 @@ use libc::waitpid;
 use log::*;
 use messages::{Message, RunMessage, SyncMutations, TerminatedMessage};
 use mutation_cache::{MutationCache, MutationCacheEntryFlags};
+use std::env;
+use std::fs::read_dir;
 use std::time::Instant;
 use std::{
     collections::HashSet,
@@ -28,7 +30,7 @@ use proc_maps;
 
 use crate::{
     jit::{self, Jit, JitError},
-    logging, tracing,
+    logging,
 };
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 1000 * 300;
@@ -40,13 +42,12 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 pub static IS_CHILD: AtomicBool = AtomicBool::new(false);
 
 /// Map used to trace coverage and execution count of the patch points.
-static TRACE_MAP: Mutex<Option<tracing::TraceMap<u64>>> = Mutex::new(None);
+static TRACE_MAP: Mutex<Option<TraceMap>> = Mutex::new(None);
 
 lazy_static! {
     /// Mappings of the processes's virtual address space.
     pub static ref PROC_MAPPINGS: Mutex<Option<Vec<proc_maps::MapRange>>> = Mutex::new(None);
     pub static ref COMMUNICATION_CHANNEL: Mutex<Option<CommunicationChannel>> = Mutex::new(None);
-    pub static ref IO_SYNC_CHANNEL: Mutex<Option<IOSyncChannel>> = Mutex::new(None);
 }
 
 /// Send the given message to the coordinator.
@@ -111,11 +112,12 @@ const AGENT_NAME: &str = "SOURCE";
 
 /// Spin-up the forkserver by setting up communication to the coordinator.
 pub fn start_forkserver() {
-    let iosync_new = IOSyncChannel::from_env(AGENT_NAME);
-    if let Ok(mut iosync) = IO_SYNC_CHANNEL.try_lock() {
-        *iosync = Some(iosync_new);
+    println!("Entering start_forkserver()");
+    for (key, value) in env::vars() {
+        println!("Source agent loads env: {} = {}", key, value);
     }
 
+    println!("Source setting up COMMUNICATION_CHANNEL");
     let new_cc = CommunicationChannel::from_env(AGENT_NAME);
     match new_cc {
         // Assume that we are not executed by the coordinator, just execute the
@@ -124,7 +126,6 @@ pub fn start_forkserver() {
         Err(err) => panic!("Unexpected error: {:?}", err),
         Ok(_) => (),
     }
-
     let mut cc_guard = COMMUNICATION_CHANNEL.try_lock().unwrap();
     *cc_guard = Some(new_cc.unwrap());
     let cc = cc_guard.as_ref().unwrap();
@@ -132,28 +133,43 @@ pub fn start_forkserver() {
     cc.unlink();
     drop(cc_guard);
 
+    println!("Source setting up logger");
     let level = std::env::var(ENV_LOG_LEVEL).unwrap_or("Debug".to_owned());
     let level = log::Level::from_str(&level).unwrap();
     logging::setup_logger(level).unwrap();
     logging::setup_panic_logging();
 
-    log::info!("Starting forkserver");
-    log::info!("Agent log level is {}", level);
+    log::info!("Source starting forkserver");
+    log::info!("Source agent log level is {}", level);
 
-    let trace_map = tracing::TraceMap::new();
-    let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-    let _ = trace_map_guard.insert(trace_map);
-    drop(trace_map_guard);
+    // #[cfg(any(debug_assertions, test))]
+    let entries = read_dir("/proc/self/fd").unwrap();
+    for entry in entries {
+        let entry = entry.unwrap();
+        let fd = entry.file_name().into_string().unwrap();
+        println!("fd: {fd}");
+    }
+
+    match TraceMap::from_env() {
+        Ok(trace_map) => {
+            let mut trace_map_guard = TRACE_MAP.lock().unwrap();
+            trace_map.unlink();
+            let _ = trace_map_guard.insert(trace_map);
+        }
+        Err(e) => {
+            log::error!("Failed to create TraceMap from environments: {:?}", e);
+        }
+    };
 
     update_proc_mappings();
 
-    info!("Sending HelloMessage");
+    debug!("Sending HelloMessage");
     send_message(
         messages::HelloMessage::new(unsafe { libc::gettid() }),
         HANDSHAKE_TIMEOUT,
     )
     .expect("Failed to send HelloMessage.");
-    info!("HelloMessage send");
+    debug!("HelloMessage send");
 
     process_messages();
 }
@@ -169,11 +185,14 @@ pub unsafe extern "C" fn __tracing_cb(id: u64) {
     // ! cross a patch point. Right now, each stub called from a patch point
     // ! makes a copy of all  GPR registers. This could be improved by utilizing
     // ! (all) live values recorded  in the patch points.
+    if !IS_CHILD.load(Ordering::Relaxed) {
+        return;
+    }
     let mut trace_map_guard = TRACE_MAP.lock().unwrap();
     trace_map_guard
         .as_mut()
         .expect("Called tracing_cb without initializing TRACE_MAP")
-        .report_hit(id);
+        .hit(id);
 }
 
 /// Revert all changes applied to the binary and reapply all mutations that are
@@ -197,8 +216,13 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
 
     // Reset the trace maps state thus we can register new mutation entries
     // for tracing if any entry requests tracing below.
+
     let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-    trace_map_guard.as_mut().unwrap().reset();
+    if let Some(trace_map) = trace_map_guard.as_mut() {
+        trace_map.clear();
+    } else {
+        log::error!("TRACE_MAP is not initialized!")
+    }
     drop(trace_map_guard);
 
     // We are about to reset all patch points -> make them writeable.
@@ -210,7 +234,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
     // thus we can restore the original binary later. This will only snapshot
     // those patch points we never touched before.
     for entry in entries.iter() {
-        agent.jit.snapshot_patch_point(entry.clone());
+        agent.jit.snapshot_patch_point(entry);
     }
 
     // The function used to report patch point hits during tracing.
@@ -244,7 +268,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
         }
 
         if entry.is_flag_set(MutationCacheEntryFlags::TracingEnabled) {
-            //log:: log::trace!("Tracing is enabled for {:?}", entry);
+            // log:: log::trace!("Tracing is enabled for {:?}", entry);
             // Tracing for this entry was requested.
 
             // We pass our own id as argument to the callback.
@@ -328,6 +352,7 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
             // ! we leave this task to the child because it knows when that is the case.
             let pid = nix::unistd::getpid();
             let pid_msg = ChildPid::new(pid.as_raw() as u64);
+            log::trace!("Sending source child pid");
             send_message(pid_msg, DEFAULT_TIMEOUT_MS).unwrap();
 
             // Drop the communication channel to prevet child from sending
@@ -355,39 +380,24 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
             } else {
                 unreachable!();
             }
+
+            log::debug!(
+                "Child {} terminated with status: {}",
+                pid,
+                terminated_msg.exit_code
+            );
         }
         _ => panic!("fork failed"),
     }
 
-    // Postprocess execution trace (potentially) generated by the child.
-    postprocess_trace_map();
-
+    log::debug!("Sending MsgIdTerminated message");
     // Report the child's exit status to the coordinator
     send_message(terminated_msg, DEFAULT_TIMEOUT_MS)
         .expect("Failed to report child status to the coordinator");
+    // Now the logging capabilities is off, since the fuzzer breaks the message receiving loop
+    println!("MsgIdTerminated message sent");
 
     ProcessType::PARENT
-}
-
-/// If the last run produced trace data, report them to the parent.
-fn postprocess_trace_map() {
-    let mut trace_hits = 0;
-    let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-    trace_map_guard.as_ref().unwrap().hit_map().map(|entries| {
-        let start_ts = Instant::now();
-        for e in entries.iter() {
-            if e.hits > 0 {
-                trace_hits += e.hits;
-                send_message(
-                    messages::TracePointStat::new(e.value.into(), e.hits, e.order),
-                    DEFAULT_TIMEOUT_MS,
-                )
-                .unwrap();
-            }
-        }
-        log::debug!("Processed trace map in {:?}", start_ts.elapsed());
-    });
-    trace_map_guard.as_mut().unwrap().reset_hits();
 }
 
 /// Main loop of the source agent that waits for instructions from the
@@ -395,12 +405,11 @@ fn postprocess_trace_map() {
 fn process_messages() {
     let mut agent = Agent::new();
 
-    info!("Ready to receive orders. Starting main loop.");
+    debug!("Ready to receive orders. Starting main loop.");
     loop {
         let new_msg = recv_message(DEFAULT_TIMEOUT_MS);
         let new_msg = new_msg.expect("Failed to receive message from parent.");
-        log::trace!("Received new message {:?}", &new_msg);
-
+        log::debug!("Received new message {:?}", &new_msg);
         match new_msg {
             ReceivableMessages::SyncMutations(msg) => {
                 log::trace!("Received SyncMutations message");
@@ -419,25 +428,9 @@ fn process_messages() {
                     std::mem::forget(agent);
                     return;
                 }
+                println!("Child is terminated, agent continues");
             }
             _ => panic!("Unhandled message: {:#?}", new_msg),
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn __ft_io_sync() {
-    let mut iosync = IO_SYNC_CHANNEL
-        .try_lock()
-        .expect("Failed to unlock IO_SYNC_CHANNEL");
-    iosync
-        .as_ref()
-        .expect("IO_SYNC_CHANNEL not initialized")
-        .io_yield()
-        .expect("Failed to yield IO_SYNC_CHANNEL");
-    iosync
-        .as_mut()
-        .expect("IO_SYNC_CHANNEL not initialized")
-        .io_await()
-        .expect("Failed to await IO_SYNC_CHANNEL");
 }

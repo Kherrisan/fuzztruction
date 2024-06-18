@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use super::FuzzingPhase;
 use crate::fuzzer::{
     worker::FuzzingWorker,
@@ -24,7 +26,7 @@ impl FuzzingWorker {
         let candidates = source.mutation_cache().borrow_mut().entries_mut_static();
 
         let mut mutations = Vec::<(
-            &mut MutationCacheEntry,
+            Rc<RefCell<&mut MutationCacheEntry>>,
             Vec<Box<dyn mutators::Mutator<Item = ()>>>,
         )>::new();
 
@@ -38,32 +40,34 @@ impl FuzzingWorker {
                 _ => 64 * 128,
             };
 
+            let candidate = Rc::new(RefCell::new(candidate));
+
             if msk_len <= 4 {
-                let mutator = mutators::U8Counter::new(candidate.get_msk_as_slice());
+                let mutator = mutators::U8Counter::new(candidate.clone());
                 if entry.stats_rw().mark_mutator_done(mutator.mutator_type()) {
                     mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
                 }
             }
 
-            let mutator = mutators::Havoc::new(candidate.get_msk_as_slice(), 16, 100);
+            let mutator = mutators::Havoc::new(candidate.clone(), 16, 100);
             mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
 
-            let mutator = mutators::RandomByte1::new(candidate.get_msk_as_slice(), iterations);
+            let mutator = mutators::RandomByte1::new(candidate.clone(), iterations);
             if let Some(mutator) = mutator {
                 mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
             }
 
-            let mutator = mutators::RandomByte4::new(candidate.get_msk_as_slice(), iterations);
+            let mutator = mutators::RandomByte4::new(candidate.clone(), iterations);
             if let Some(mutator) = mutator {
                 mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
             }
 
-            let mutator = mutators::FlipBit::new(candidate.get_msk_as_slice());
+            let mutator = mutators::FlipBit::new(candidate.clone());
             if entry.stats_rw().mark_mutator_done(mutator.mutator_type()) {
                 mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
             }
 
-            let entry = (unsafe { candidate.alias_mut() }, mutators);
+            let entry = (candidate, mutators);
             mutations.push(entry);
         }
 

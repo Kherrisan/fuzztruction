@@ -21,6 +21,7 @@ path = "src/lib.rs"
 
 [features]
 #default = ["introspection"]
+never-timeout = []
 introspection = []
 
 [dependencies]
@@ -69,3 +70,7 @@ glob = "0.3.0"
 flate2 = "1.0.22"
 fs_extra = "1.2.0"
 llvm_stackmap = { version = "0.1.4", features = ["serde"] }
+yansi = "~1"
+# LibAFL
+libafl = { version = "0.11.2", features = ["prometheus_monitor"] }
+libafl_bolts = "0.11.2"

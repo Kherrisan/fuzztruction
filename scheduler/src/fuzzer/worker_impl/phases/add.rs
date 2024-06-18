@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use super::FuzzingPhase;
 use crate::{
@@ -26,9 +26,12 @@ impl FuzzingWorker {
     fn add_phase_prepare_mutations(
         qe: Arc<QueueEntry>,
         candidates: Vec<&'static mut MutationCacheEntry>,
-    ) -> Vec<(&mut MutationCacheEntry, Vec<Box<dyn Mutator<Item = ()>>>)> {
+    ) -> Vec<(
+        Rc<RefCell<&mut MutationCacheEntry>>,
+        Vec<Box<dyn Mutator<Item = ()>>>,
+    )> {
         let mut mutations = Vec::<(
-            &mut MutationCacheEntry,
+            Rc<RefCell<&mut MutationCacheEntry>>,
             Vec<Box<dyn mutators::Mutator<Item = ()>>>,
         )>::new();
         for candidate in candidates.into_iter() {
@@ -41,17 +44,18 @@ impl FuzzingWorker {
                 _ => 64 * 128,
             };
 
-            let mutator = mutators::RandomByte1::new(candidate.get_msk_as_slice(), iterations);
+            let candidate = Rc::new(RefCell::new(candidate));
+            let mutator = mutators::RandomByte1::new(candidate.clone(), iterations);
             if let Some(mutator) = mutator {
                 mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
             }
 
-            let mutator = mutators::FlipBit::new(candidate.get_msk_as_slice());
+            let mutator = mutators::FlipBit::new(candidate.clone());
             if qe.stats_rw().mark_mutator_done(mutator.mutator_type()) {
                 mutators.push(Box::new(mutator) as Box<dyn mutators::Mutator<Item = ()>>);
             }
 
-            let entry = (unsafe { candidate.alias_mut() }, mutators);
+            let entry = (candidate, mutators);
             mutations.push(entry);
         }
         mutations

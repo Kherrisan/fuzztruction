@@ -15,6 +15,7 @@ use jail::jail::{Jail, JailBuilder};
 use llvm_stackmap::LocationType;
 use std::{
     collections::HashMap,
+    env,
     fmt::Debug,
     path::Path,
     str::FromStr,
@@ -41,7 +42,7 @@ use std::io;
 use std::{convert::TryFrom, ffi::CString};
 use std::{fs::OpenOptions, io::prelude::*};
 
-use log::{error, kv::ToValue};
+use log::{error, kv::ToKey};
 
 use lazy_static::lazy_static;
 use libc::{self};
@@ -60,10 +61,19 @@ use crate::{mutation_cache::MutationCache, patchpoint::PatchPoint};
 use crate::io_channels::*;
 
 const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_secs(120);
-const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
+
 const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(not(feature = "never-timeout"))]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_SIZE: u64 = n_mib_bytes!(1) as u64;
+
+#[cfg(feature = "never-timeout")]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3600 * 24);
+
+#[cfg(not(feature = "never-timeout"))]
+const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(10);
+#[cfg(feature = "never-timeout")]
+const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 lazy_static! {
     /// Mapping of (binary path, Child PID) to patch point collection if they
@@ -93,7 +103,7 @@ pub enum SourceError {
 }
 
 /// Result of one run of the target application.
-#[derive()]
+#[derive(Clone)]
 pub enum RunResult {
     /// The target terminated gracefully.
     Terminated {
@@ -168,7 +178,7 @@ pub struct Source {
     /// Args passed to the binary (excluding argv[0]).
     args: Vec<String>,
     /// Workdir
-    workdir: PathBuf,
+    pub workdir: PathBuf,
     /// Directory containing data related to the sources state.
     state_dir: PathBuf,
     /// The way input is consumed.
@@ -192,7 +202,8 @@ pub struct Source {
     /// Queue used to receive message from the target agent.
     pub mq_recv: Option<PosixMq>,
     /// The PID of the target's parent (source agent).
-    pid: Option<i32>,
+    pub forkserver_pid: Option<i32>,
+    child_pid: Option<i32>,
     mem_file: Option<File>,
     log_stdout: bool,
     log_stderr: bool,
@@ -226,25 +237,24 @@ impl Source {
 
         let mut state_dir = workdir.clone();
         state_dir.push("state");
+        log::debug!("Creating state dir {:?}", &state_dir);
+        fs::create_dir_all(&state_dir)?;
 
         workdir.push("workdir");
         log::debug!("Creating workdir {:?}", &workdir);
         fs::create_dir_all(&workdir)?;
 
-        log::debug!("Creating state dir {:?}", &state_dir);
-        fs::create_dir_all(&state_dir)?;
-
         Source::check_link_time_deps(&path, config)?;
 
         let mut rand_suffix: String = thread_rng()
             .sample_iter(&Alphanumeric)
-            .take(30)
+            .take(6)
             .map(char::from)
             .collect();
         rand_suffix += &format!("_tid_{}", unsafe { libc::gettid().to_string() });
 
-        let mq_send_name: String = "/mq_send_".to_owned() + &rand_suffix;
-        let mq_recv_name: String = "/mq_recv_".to_owned() + &rand_suffix;
+        let mq_send_name: String = "/mq_source_send_".to_owned() + &rand_suffix;
+        let mq_recv_name: String = "/mq_source_recv_".to_owned() + &rand_suffix;
 
         let tmpfile = Temp::new_file_in(&workdir).expect("Failed to create tempfile.");
         let input_output_prefix_path = tmpfile.to_str().unwrap();
@@ -290,22 +300,22 @@ impl Source {
         let input_file = (file_in, file_in_name);
         let mut output_file = (file_out, out_file_path);
 
-        let stdout_file = None;
-        // if log_stdout {
-        //     // Setup file for stdout logging.
-        //     let mut path = workdir.clone();
-        //     path.push("stdout");
-        //     workdir_file_whitelist.push(path.clone());
+        let mut stdout_file = None;
+        if log_stdout {
+            // Setup file for stdout logging.
+            let mut path = workdir.clone();
+            path.push("stdout");
+            workdir_file_whitelist.push(path.clone());
 
-        //     let file = OpenOptions::new()
-        //         .read(true)
-        //         .write(true)
-        //         .create(true)
-        //         .truncate(true)
-        //         .open(&path)
-        //         .unwrap();
-        //     stdout_file = Some((file, path));
-        // }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            stdout_file = Some((file, path));
+        }
 
         let mut stderr_file = None;
         if log_stderr {
@@ -458,7 +468,8 @@ impl Source {
             mq_recv_name,
             mq_send: None,
             mq_recv: None,
-            pid: None,
+            forkserver_pid: None,
+            child_pid: None,
             mem_file: None,
             log_stdout,
             log_stderr,
@@ -499,6 +510,15 @@ impl Source {
         Ok(())
     }
 
+    pub fn build(
+        config: &Config,
+        id: Option<usize>,
+    ) -> Result<Source> {
+        let source = Source::from_config(config, id)?;
+
+        Ok(source)
+    }
+
     pub fn from_config(config: &Config, id: Option<usize>) -> Result<Source> {
         let config_new = config.clone();
         let mut workdir = config_new.general.work_dir.clone();
@@ -525,27 +545,25 @@ impl Source {
 
         log::debug!("Creating POSIX queues");
         log::debug!("Creating sending MQ: {}", self.mq_send_name);
-        self.mq_send = Some(
-            posixmq::OpenOptions::readwrite()
-                .create_new()
-                .open(&self.mq_send_name)
-                .context("Failed to create send MQ")?,
-        );
+        let mq_send = posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open(&self.mq_send_name)
+            .context("Failed to create send MQ")?;
+        self.mq_send = Some(mq_send);
 
         log::debug!("Creating receiving MQ: {}", self.mq_recv_name);
-        self.mq_recv = Some(
-            posixmq::OpenOptions::readwrite()
-                .create_new()
-                .open(&self.mq_recv_name)
-                .context("Failed to create recv MQ")?,
-        );
+        let mq_recv = posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open(&self.mq_recv_name)
+            .context("Failed to create recv MQ")?;
+        self.mq_recv = Some(mq_recv);
 
-        let child_pid;
+        let forkserver_pid;
         unsafe {
-            log::debug!("Forking child");
-            child_pid = libc::fork();
+            log::debug!("Forking source child");
+            forkserver_pid = libc::fork();
 
-            match child_pid {
+            match forkserver_pid {
                 -1 => {
                     /* Error case */
                     log::error!("Failed to fork child");
@@ -584,13 +602,13 @@ impl Source {
                     // Create the environment pointer array.
                     let mut envp: Vec<CString> = Vec::new();
                     let env_mq_recv = CString::new(
-                        format!("FT_MQ_SEND={}", self.mq_recv_name.as_str()).as_bytes(),
+                        format!("FT_MQ_SOURCE_SEND={}", self.mq_recv_name.as_str()).as_bytes(),
                     )
                     .expect("Failed to format FT_MQ_SEND");
                     envp.push(env_mq_recv);
 
                     let env_mq_send = CString::new(
-                        format!("FT_MQ_RECV={}", self.mq_send_name.as_str()).as_bytes(),
+                        format!("FT_MQ_SOURCE_RECV={}", self.mq_send_name.as_str()).as_bytes(),
                     )
                     .expect("Failed to format FT_MQ_RECV");
                     envp.push(env_mq_send);
@@ -655,21 +673,22 @@ impl Source {
                             libc::dup2(self.output_file.0.as_raw_fd(), libc::STDOUT_FILENO);
                             libc::close(self.output_file.0.as_raw_fd());
                         }
-                        _ => {
-                            if !self.log_stdout {
-                                libc::dup2(dev_null_fd, libc::STDOUT_FILENO);
-                            } else {
-                                // let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
-                                // libc::dup2(fd, libc::STDOUT_FILENO);
-                                // libc::close(fd);
-                            }
-                        }
+                        _ => {}
+                    }
+
+                    log::debug!("Redirecting stdout to {:?}", self.stdout_file);
+                    if !self.log_stdout {
+                        libc::dup2(dev_null_fd, libc::STDOUT_FILENO);
+                    } else {
+                        let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
+                        libc::dup2(fd, libc::STDOUT_FILENO);
+                        libc::close(fd);
                     }
 
                     if self.log_stderr {
-                        // let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
-                        // libc::dup2(fd, libc::STDERR_FILENO);
-                        // libc::close(fd);
+                        let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
+                        libc::dup2(fd, libc::STDERR_FILENO);
+                        libc::close(fd);
                     } else {
                         libc::dup2(dev_null_fd, libc::STDERR_FILENO);
                     }
@@ -704,10 +723,29 @@ impl Source {
                     assert_eq!(ret, 0);
 
                     // Disable ASLR since we rely on all instances having the same memory layout.
-                    let ret = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
-                    assert_eq!(ret, 0);
+                    let _ = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
+                    let check_personality = libc::personality(0xffffffff);
+                    if check_personality & libc::ADDR_NO_RANDOMIZE == 0 {
+                        let err = std::io::Error::last_os_error();
+                        let errno = err.raw_os_error().unwrap_or(0);
+                        // 根据错误码进行判断
+                        match errno {
+                            libc::EINVAL => {
+                                log::error!("Invalid argument");
+                            }
+                            libc::EPERM => {
+                                log::error!("Operation not permitted");
+                            }
+                            // 其他错误处理...
+                            _ => {
+                                log::error!("Unknown error: {}", errno);
+                            }
+                        }
+                        panic!("Failed to disable ASLR");
+                    }
 
-                    std::env::set_current_dir(&self.workdir).unwrap();
+                    std::env::set_current_dir(&self.config.as_ref().unwrap().sink.cwd)
+                        .expect("Failed to set workdir");
                     if let Some(ref mut jail) = self.jail {
                         // ! Make sure that the code in `enter()` is async-signal-safe since we
                         // ! are the forked child of a multithreaded application.
@@ -724,6 +762,10 @@ impl Source {
                     assert_eq!(nix::unistd::getuid(), nix::unistd::geteuid());
                     assert_eq!(nix::unistd::getegid(), nix::unistd::getegid());
 
+                    // Copy all environment variables from current process into the new process
+                    env::vars()
+                        .for_each(|e| envp.push(CString::new(format!("{}={}", e.0, e.1)).unwrap()));
+
                     nix::unistd::execve(prog, &argv, &envp).unwrap();
                     unreachable!();
                 }
@@ -735,10 +777,13 @@ impl Source {
         self.stdout_file.take();
         self.stderr_file.take();
 
-        self.pid = Some(child_pid);
+        /* The parent */
+        log::info!("Forkserver has pid {}", forkserver_pid);
+
+        self.forkserver_pid = Some(forkserver_pid);
 
         // Dump some info to state dir
-        self.dump_state_to_disk(child_pid)?;
+        self.dump_state_to_disk(forkserver_pid)?;
 
         // Wait for the handshake response.
         log::debug!("Waiting for handshake message.");
@@ -754,14 +799,14 @@ impl Source {
             OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(format!("/proc/{}/mem", child_pid))
+                .open(format!("/proc/{}/mem", forkserver_pid))
                 .context("Failed to open /proc/<x>/mem")?,
         );
 
         // Get the mapping of the target memory space.
         // NOTE: This might not include lazily loaded libraries.
         let mut mappings =
-            get_process_maps(self.pid.unwrap()).context("Failed to get process maps")?;
+            get_process_maps(self.forkserver_pid.unwrap()).context("Failed to get process maps")?;
         for map in mappings.iter_mut() {
             let pathname = map
                 .pathname
@@ -820,7 +865,7 @@ impl Source {
 
         let removed_cnt = old_size - patch_points.len();
         if removed_cnt > 0 {
-            log::warn!("Removed {} patch points during filtering.", removed_cnt);
+            log::warn!("Removed {} patch points during filtering duplicated vmas.", removed_cnt);
         }
     }
 
@@ -920,7 +965,9 @@ impl Source {
             }
         }
         assert_eq!(PATCH_POINT_SIZE, 32);
-        let nop_pattern = b"\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x66\x90";
+        // let nop_pattern = b"\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x2E\x66\x0F\x1F\x84\x00\x00\x02\x00\x00\x66\x90";
+        // The new 32-bytes nop pattern is seen in the patched point.
+        let nop_pattern = b"\x66\x66\x66\x66\x66\x2e\x66\x0f\x1f\x84\x00\x00\x02\x00\x00\x66\x66\x66\x66\x66\x2e\x66\x0f\x1f\x84\x00\x00\x02\x00\x00\x66\x90";
         patch_points.retain(|p| {
             let content = self.read_mem(p.vma() as usize, nop_pattern.len());
             if let Ok(content) = content {
@@ -976,7 +1023,7 @@ impl Source {
     pub fn try_get_child_exit_reason(&self) -> Option<(Option<i32>, Option<Signal>)> {
         let status: libc::c_int = 0;
         let ret = unsafe {
-            let pid = self.pid.unwrap();
+            let pid = self.forkserver_pid.unwrap();
             libc::waitpid(pid, status as *mut libc::c_int, libc::WNOHANG)
         };
         if ret > 0 {
@@ -996,7 +1043,7 @@ impl Source {
 
     /// Stop the child process.
     pub fn stop(&mut self) -> Result<&Source, SourceError> {
-        if let Some(pid) = self.pid.take() {
+        if let Some(pid) = self.forkserver_pid.take() {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
                 // reap it
@@ -1022,14 +1069,19 @@ impl Source {
 
     /// Get the memory mappings of the child process.
     pub fn read_mapping(&mut self) -> Result<Vec<MapRange>> {
-        assert!(self.pid.is_some(), "read_mapping: Source's pid not set");
-        Ok(get_process_maps(self.pid.unwrap() as proc_maps::Pid)?)
+        assert!(
+            self.forkserver_pid.is_some(),
+            "read_mapping: Source's pid not set"
+        );
+        Ok(get_process_maps(
+            self.forkserver_pid.unwrap() as proc_maps::Pid
+        )?)
     }
 
     /// Get all memory mappings of the main executable of the child process.
     pub fn get_main_executable_mappings(&mut self) -> Result<Vec<MapRange>> {
         assert!(
-            self.pid.is_some(),
+            self.forkserver_pid.is_some(),
             "get_main_executable_mappings: Source's process not set (expected Popen)"
         );
         let path = self
@@ -1067,7 +1119,7 @@ impl Source {
 
     /// Read size bytes from address from the targets virtual address space.
     pub fn read_mem(&self, address: usize, size: usize) -> Result<Vec<u8>> {
-        let pid = self.pid.unwrap();
+        let pid = self.forkserver_pid.unwrap();
         let buf = vec![0; size];
 
         unsafe {
@@ -1189,14 +1241,14 @@ impl Source {
     }
 
     /// Process a JSON encoded `LogRecordWrapper` object and pass it to the logging backend.
-    fn process_log_record_message(msg: String) {
+    pub fn process_log_record_message(msg: String) {
         let record = serde_json::from_str::<LogRecordWrapper>(&msg);
         if let Err(r) = record {
             log::error!("Failed to decode log message: {}. Err({})", msg, r);
             return;
         }
 
-        let record = record.unwrap();
+        let mut record = record.unwrap();
         let mut builder = log::RecordBuilder::new();
         builder.level(record.level);
         let mod_path = record.module_path.as_deref();
@@ -1205,9 +1257,25 @@ impl Source {
         builder.file(record.file.as_deref());
         builder.target(record.target.as_str());
 
+        let msg_source = record.log_source.take().unwrap_or("fuzzer".to_string());
+        let tid = record
+            .tid
+            .take()
+            .unwrap_or_else(|| unsafe { libc::gettid() })
+            .to_string();
+        let time = record.time.take().unwrap_or_else(|| {
+            chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        });
+        let kvs = [
+            ("log_source".to_key(), msg_source.as_str()),
+            ("tid".to_key(), tid.as_str()),
+            ("time".to_key(), time.as_str()),
+        ];
+        builder.key_values(&kvs);
+
         let logger = log::logger();
-        let kv = (log::kv::Key::from_str("from_agent"), true.to_value());
-        builder.key_values(&kv);
         logger.log(&builder.args(format_args!("{}", &record.message)).build());
     }
 
@@ -1247,23 +1315,20 @@ impl Source {
         Ok(())
     }
 
-    /// Execute the target and report the execution result.
-    ///
-    /// # Errors
-    /// All returned errors must be considered as unrecoverable fatal error.
-    pub fn run(&mut self, timeout: Duration) -> Result<RunResult> {
-        if cfg!(debug) && self.input_file.0.stream_len().unwrap() == 0 {
-            log::warn!("Running without input! Is this intentional?");
-        }
+    pub fn fork(&mut self) -> Result<()> {
+        // The timeout_ms field in the RunMessage is unused
+        // by the agent, so we use default()
+        let run_msg = RunMessage::from_millis(Default::default());
 
-        // Make sure we do not create huge output files because nobody calls read().
-        self.truncate_stdout_output();
-
-        let run_msg = RunMessage::from_millis(timeout.as_millis() as u32);
         let mq_send = self
             .mq_send
             .as_ref()
             .expect("start() must be called first!");
+        // Request run
+        mq_send
+            .send_timeout(0, run_msg.to_bytes(), DEFAULT_SEND_TIMEOUT)
+            .context("Failed to send RunMessage")?;
+
         let mq_recv = self
             .mq_recv
             .as_ref()
@@ -1272,57 +1337,86 @@ impl Source {
         // Scratch buffer.
         let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
 
-        // Vector used to store messages that preceded the termination message.
-        let mut msgs: Vec<ReceivableMessages> = Vec::new();
-
-        // Request run
-        mq_send
-            .send_timeout(0, run_msg.to_bytes(), DEFAULT_SEND_TIMEOUT)
-            .context("Failed to send RunMessage")?;
-
         // Retrive child sid thus we can kill the forked child if it is unresponsive.
-        log::trace!("Waiting for the child sid");
-        self.receive_message(
-            DEFAULT_RECEIVE_TIMEOUT,
-            &mut buf,
-        )
-        .context("Failed to receive child pid")?;
+        log::trace!("Waiting for source child sid");
+        self.receive_message(DEFAULT_RECEIVE_TIMEOUT, &mut buf)
+            .context("Failed to receive source child pid")?;
         let pid_msg = ChildPid::try_from_bytes(&buf)?;
-        log::trace!("Got child sid: {}", pid_msg.pid);
+        self.child_pid = Some(pid_msg.pid as i32);
+        log::trace!("Got child sid: {}", self.child_pid.unwrap());
+
+        let mut path = self.state_dir.clone();
+        path.push("child_pid");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(format!("{}", self.child_pid.unwrap()).as_bytes())?;
+
+        Ok(())
+    }
+
+    /// Execute the target and report the execution result.
+    ///
+    /// # Errors
+    /// All returned errors must be considered as unrecoverable fatal error.
+    pub fn run(&mut self, timeout_remaining: Duration) -> Result<RunResult> {
+        let mut ts = Instant::now();
+        let mut timeout_remaining = timeout_remaining;
+        log::debug!("Launch source message loop");
+        let mut msgs = vec![];
+        let mut buf: Vec<u8> = vec![0; self.mq_recv.as_ref().unwrap().attributes().max_msg_len];
+
+        let mut terminating = false;
+        let mut kill_child_ret = Ok(());
 
         // Wait for reply
         loop {
-            // Get the next message
-            match self.receive_message(timeout, &mut buf) {
-                Ok(_) => (),
-                Err(_) => {
-                    // The child did not terminated in time
-                    // => kill it and consume the resulting terminated message.
-                    log::trace!(
-                        "Did not receive any response in time. Manually killing the child."
+            timeout_remaining = timeout_remaining.saturating_sub(ts.elapsed());
+            if timeout_remaining <= Duration::ZERO && !terminating {
+                terminating = true;
+                // The child did not terminated in time
+                log::trace!(
+                        "There is no time remaining for the source running. Manually killing the child."
                     );
-                    let kill_child_ret = kill_child_process_group(&pid_msg);
-
-                    // Consume the TerminatedMessage that might be caused by our
-                    // killpg() call, or, if the child won the race be the actual
-                    // TerminatedMessage (in other words, we misinterpreted this as a timeout).
-                    // Anyways, there should be exactly one TerminatedMessage message. If not,
-                    // then this is a fatal error since the agents state becomes unknown.
-                    log::trace!("Waiting for termination acknowledgment.");
-                    let msg = self.wait_for_message::<TerminatedMessage>(DEFAULT_RECEIVE_TIMEOUT);
-                    if let Err(err) = msg {
+                let pid_msg = ChildPid::new(self.child_pid.unwrap() as u64);
+                kill_child_ret = kill_child_process_group(&pid_msg);
+                continue;
+            }
+            ts = Instant::now();
+            // Get the next message
+            let recv_timeout = if terminating {
+                DEFAULT_RECEIVE_TIMEOUT
+            } else {
+                timeout_remaining
+            };
+            match self.receive_message(recv_timeout, &mut buf) {
+                Ok(_) => (),
+                Err(err) => {
+                    if !terminating {
+                        terminating = true;
+                        // The child did not terminated in time
+                        log::trace!(
+                            "Did not receive any response in time. Manually killing the child."
+                        );
+                        let pid_msg = ChildPid::new(self.child_pid.unwrap() as u64);
+                        kill_child_ret = kill_child_process_group(&pid_msg);
+                        continue;
+                    } else {
+                        // We have killpg the source, but have not received the TerminatedMessage yet.
+                        // This is a fatal error, since the state of the agent is unknown.
                         log::error!(
                             "The agent failed to acknowledge our termination request. err={}, child_pid={}, kill_child_ret={:?}",
-                            err, pid_msg.pid, kill_child_ret
+                            err, self.child_pid.unwrap(), kill_child_ret
                         );
                         return Err(err.context("Expected TerminatedMessage after issuing killpg"));
                     }
-
-                    return Ok(RunResult::TimedOut { msgs });
                 }
             }
 
             let header = MsgHeader::try_from_bytes(&buf)?;
+
             match header.id {
                 MessageType::MsgIdTracePointStat => {
                     log::trace!("Got MsgIdTracePointStat message");
@@ -1334,7 +1428,10 @@ impl Source {
                     let msg = TerminatedMessage::try_from_bytes(&buf)?;
                     let exit_code = msg.exit_code;
                     log::trace!("Received MsgIdTerminated message.");
-                    if exit_code >= 0 {
+                    if terminating {
+                        log::trace!("Child was killed by us, acknowledgement received");
+                        return Ok(RunResult::TimedOut { msgs });
+                    } else if exit_code >= 0 {
                         log::trace!("Child terminated");
                         return Ok(RunResult::Terminated { exit_code, msgs });
                     } else {
@@ -1351,7 +1448,7 @@ impl Source {
                     log::error!("{}", err_msg);
                     return Err(anyhow!(err_msg).context("Error while processing received message"));
                 }
-            }
+            };
         }
     }
 
@@ -1565,16 +1662,16 @@ impl Source {
     }
 
     /// Dump some information to the sources state directory.
-    fn dump_state_to_disk(&self, child_pid: i32) -> Result<()> {
+    fn dump_state_to_disk(&self, forkserver_pid: i32) -> Result<()> {
         let mut path = self.state_dir.clone();
 
-        path.push("child_pid");
+        path.push("forkserver_pid");
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&path)?;
-        file.write_all(format!("{}", child_pid).as_bytes())?;
+        file.write_all(format!("{}", forkserver_pid).as_bytes())?;
 
         let own_pid = unsafe { libc::getpid() };
         let mut path = self.state_dir.clone();
@@ -1697,5 +1794,43 @@ impl Drop for Source {
     /// Stop the child if the Source get dropped.
     fn drop(&mut self) {
         self.stop().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proc_maps::{get_process_maps, MapRange, Pid};
+
+    fn get_stack_mapping(pid: Pid) -> MapRange {
+        let mappings = get_process_maps(pid).unwrap();
+        mappings
+            .iter()
+            .find(|m| m.pathname.is_some() && m.pathname.as_ref().unwrap() == "[stack]")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn mq() {
+        posixmq::OpenOptions::readwrite()
+            .create_new()
+            .open("123456")
+            .unwrap();
+    }
+
+    #[test]
+    fn disable_aslr() {
+        let pid = std::process::id();
+        let old_personality = unsafe { libc::personality(0xffffffff) };
+        if old_personality & libc::ADDR_NO_RANDOMIZE != 0 {
+            println!("ASLR is already disabled.");
+        }
+        let rtn = unsafe { libc::personality(libc::ADDR_NO_RANDOMIZE as u64) };
+        println!(
+            "libc::personality(libc::ADDR_NO_RANDOMIZE) returns: {:#?}",
+            rtn
+        );
+        let stack_mapping = get_stack_mapping(pid as i32);
+        println!("stack mapping: {:#?}", stack_mapping);
     }
 }

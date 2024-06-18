@@ -1,6 +1,8 @@
 #![allow(unused)]
 
 use fuzztruction_shared::{mutation_cache::MutationCache, types::PatchPointID};
+use libafl::corpus::CorpusId;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     default, fmt,
@@ -26,18 +28,18 @@ use super::{
     phases::FuzzingPhase,
 };
 
-#[derive(Debug, Default, Clone)]
-pub(super) struct PatchPointStatsEntry {
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PatchPointStatsEntry {
     ///Number of coverage yields.
-    pub(super) yield_cnt: u64,
+    pub yield_cnt: u64,
     /// Number of source crashes.
-    pub(super) source_crash_cnt: u64,
+    pub source_crash_cnt: u64,
     /// Total number of mutations applied.
-    pub(super) mutation_cnt: u64,
+    pub mutation_cnt: u64,
     ///Number of times the source timed out.
-    pub(super) source_timeout_cnt: u64,
+    pub source_timeout_cnt: u64,
     /// All [QueueEntryId]s of the [QueueEntry]s that are using this [PatchPointID].
-    pub(super) used_by: HashSet<QueueEntryId>,
+    pub used_by: HashSet<CorpusId>,
 }
 
 impl PatchPointStatsEntry {
@@ -152,7 +154,7 @@ impl Cerebrum {
 
             for mc_entry in mc.entries() {
                 let value = self.patch_point_stats.get_mut(&mc_entry.id()).unwrap();
-                value.used_by.insert(qe.id());
+                value.used_by.insert(CorpusId::from(qe.id().0));
                 let key = self
                     .patch_point_msks
                     .entry(mc_entry.id())

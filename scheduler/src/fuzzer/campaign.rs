@@ -137,7 +137,7 @@ impl FuzzingCampaign {
         info!("execs/s      : {:.2}", global_execs_s);
         info!(
             "Runtime      : {:?}",
-            global_stats_sum.init_ts.unwrap().elapsed()
+            global_stats_sum.init_dt.unwrap().elapsed()
         );
 
         Ok(())
