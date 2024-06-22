@@ -209,7 +209,7 @@ impl CallableFunction for NativeFunction {
 pub struct FunctionInstance {
     asm: Vec<String>,
     /// Number of arguments this function expects.
-    //arg_cnt: u8,
+    // arg_cnt: u8,
     /// The machinecode that was produced by assembling the FunctionTemplate.
     machine_code: Vec<u8>,
     vma: Option<VAddr>,
@@ -232,7 +232,7 @@ impl FunctionInstance {
         assert!(self.machine_code.len() > 0);
         self.vma = Some((dst.as_ptr() as u64).into());
 
-        //eprintln!("write_safe: {:#?}", self);
+        // eprintln!("write_safe: {:#?}", self);
 
         dst[0..self.machine_code.len()].copy_from_slice(&self.machine_code)
     }
@@ -306,16 +306,16 @@ impl FunctionTemplate {
 
         // Assemble
         let asm_str = asm.join("\n");
-        //eprintln!("Assembling:\n-----\n{}\n-----", &asm_str);
+        // eprintln!("Assembling:\n-----\n{}\n-----", &asm_str);
         let res = ks.asm(asm_str, 0);
-        //eprintln!("res={:#?}", res);
+        // eprintln!("res={:#?}", res);
         match res {
             Err(e) => {
                 log::error!("Error while assembling {}", e);
                 None
             }
             Ok(e) => {
-                //eprintln!("{:#?}", e);
+                // eprintln!("{:#?}", e);
                 Some((asm, e.bytes.clone()))
             }
         }
@@ -565,7 +565,7 @@ impl<'a> Jit<'a> {
         mce: &MutationCacheEntry,
         is_callee: bool,
     ) -> Result<FunctionTemplate, JitError> {
-        //eprintln!("gen_mutation_gpr_xmm: reg={:#?}, mce: {:#?}", reg, mce);
+        // eprintln!("gen_mutation_gpr_xmm: reg={:#?}, mce: {:#?}", reg, mce);
         let mut asm = Vec::<String>::new();
 
         let is_xmm = XMM_REGISTERS.contains(&mce.dwarf_regnum());

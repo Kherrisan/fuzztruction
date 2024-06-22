@@ -1,5 +1,6 @@
 use fuzztruction_shared::messages;
 use fuzztruction_shared::tracing::TraceMap;
+use fuzztruction_shared::util::print_fds;
 use fuzztruction_shared::{
     communication_channel::{CommunicationChannel, CommunicationChannelError},
     constants::ENV_LOG_LEVEL,
@@ -26,7 +27,7 @@ use std::{
     },
 };
 
-use proc_maps;
+use proc_maps::{self, get_process_maps, Pid};
 
 use crate::{
     jit::{self, Jit, JitError},
@@ -96,6 +97,17 @@ pub extern "C" fn __ft_auto_init() {
     // dbg!("__ft_auto_init");
     if !INIT_DONE.swap(true, Ordering::SeqCst) {
         start_forkserver();
+    }
+    let pid = unsafe { libc::getpid() };
+    let maps = get_process_maps(pid as Pid).unwrap();
+    for map in maps {
+        println!(
+            "Filename {:?} Address {} Size {} flags {}",
+            map.filename(),
+            map.start(),
+            map.size(),
+            map.flags
+        );
     }
 }
 
@@ -241,7 +253,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
     let tracing_cb_fn = jit::NativeFunction::from_fn(__tracing_cb as usize, 1);
 
     for entry in entries.iter() {
-        //log::trace!("Processing: {:?}", &entry);
+        // log::trace!("Processing: {:?}", &entry);
         let mut callables = Vec::new();
 
         // Having no mask and tracing disabled renders a MutationCacheEntry useless.
@@ -252,7 +264,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
         );
 
         if entry.msk_len() > 0 {
-            //log::trace!("Mutations are enabled for {:?}", entry);
+            // log::trace!("Mutations are enabled for {:?}", entry);
             let mutation_stub = agent.jit.gen_mutation(&entry, true);
             let mutation_stub = match mutation_stub {
                 Ok(e) => e,
@@ -263,7 +275,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             };
 
             let stub = agent.jit.allocate(mutation_stub).unwrap();
-            //log::trace!("Mutation Stub: {:#?}", stub);
+            // log::trace!("Mutation Stub: {:#?}", stub);
             callables.push(stub);
         }
 
@@ -287,10 +299,11 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             // Notify the trace map that the given vma might report a execution hit
             // during tracing.
             let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-            trace_map_guard
-                .as_mut()
-                .unwrap()
-                .alloc_slot(entry.id().into());
+            if let Some(trace_map) = trace_map_guard.as_mut() {
+                trace_map.alloc_slot(entry.id().into());
+            } else {
+                log::error!("TRACE_MAP is not initialized!")
+            }
         }
 
         if !callables.is_empty() {
@@ -304,7 +317,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
                 let patchpoint_stub = agent.jit.gen_call(&multiplexer, vec![], false, None);
                 unsafe {
                     let mut f = agent.jit.assemble(patchpoint_stub).unwrap();
-                    //log::trace!("Writing patch point stub {:#?} @ {:?}", f, entry.vma());
+                    // log::trace!("Writing patch point stub {:#?} @ {:?}", f, entry.vma());
                     f.write(entry.vma().into())
                 }
             } else {
@@ -372,6 +385,7 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
                 let ret = waitpid(pid, &mut child_status, 0);
                 assert!(ret == pid);
             }
+            log::debug!("Child {} terminated with raw status: {}", pid, child_status);
 
             if libc::WIFEXITED(child_status) {
                 terminated_msg.exit_code = libc::WEXITSTATUS(child_status);
@@ -426,6 +440,7 @@ fn process_messages() {
             ReceivableMessages::RunMessage(msg) => {
                 if let ProcessType::CHILD = run(&mut agent, &msg) {
                     std::mem::forget(agent);
+                    print_fds();
                     return;
                 }
                 println!("Child is terminated, agent continues");

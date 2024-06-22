@@ -3,6 +3,8 @@ use nix::sys::signal::Signal;
 use std::{
     alloc,
     convert::TryInto,
+    fs::{self, read_link},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -119,6 +121,31 @@ pub fn interruptable_sleep(duration: Duration, interrupt_signal: &Arc<AtomicBool
     }
     thread::sleep(duration_left);
     false
+}
+
+pub fn print_fds() {
+    let fd_dir = PathBuf::from("/proc/self/fd");
+    let entries = fs::read_dir(&fd_dir).expect("Unable to read /proc/self/fd");
+
+    // Iterate over each entry
+    for entry in entries {
+        let entry = entry.expect("Unable to read entry");
+        let fd_path = entry.path();
+
+        // Read the symbolic link to get the file it points to
+        match read_link(&fd_path) {
+            Ok(target_path) => {
+                println!(
+                    "FD {}: {}",
+                    fd_path.file_name().unwrap().to_str().unwrap(),
+                    target_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("Error reading link for {:?}: {}", fd_path, e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

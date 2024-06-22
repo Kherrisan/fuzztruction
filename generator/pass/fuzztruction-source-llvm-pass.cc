@@ -1,6 +1,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
+#include "llvm/Support/Debug.h"
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
@@ -50,6 +51,8 @@
 
 using namespace llvm;
 namespace fs = std::filesystem;
+
+// static cl::opt<std::string> PatchingVariable("patching-variable", cl::desc("Specify the variable name and the source file name to be patched"), cl::value_desc("pvar"));
 
 /*
 We need the following capabilites:
@@ -101,6 +104,7 @@ public:
     void recordPatchPointInfo(Instruction &I);
 
 private:
+    std::vector<std::tuple<std::string, std::string>> patchingVariables;
     std::vector<PatchPointInfo> patchPointInfoList;
 };
 
@@ -118,6 +122,50 @@ struct InsHook
                ", probability=" + std::to_string(probability) + "% }";
     }
 };
+
+/*
+Split a string containing multiple comma-separated keywords
+and return the set of these keywords
+*/
+std::vector<std::string> split_string(std::string s, char delim)
+{
+    size_t pos_start = 0, pos_end;
+    std::string token;
+    std::vector<std::string> res;
+
+    while ((pos_end = s.find(delim, pos_start)) != std::string::npos)
+    {
+        token = s.substr(pos_start, pos_end - pos_start);
+        pos_start = pos_end + 1;
+        res.push_back(token);
+    }
+
+    res.push_back(s.substr(pos_start));
+    return res;
+}
+
+/*
+Check if an environment variable is set.
+*/
+bool env_var_set(const char *env_var)
+{
+    const char *envp = std::getenv(env_var);
+    if (envp)
+        return true;
+    return false;
+}
+
+/*
+Convert environment variable content to a set.
+Expects comma-separated list of values in the env var.
+*/
+std::vector<std::string> parse_env_var_list(const char *env_var)
+{
+    const char *envp = std::getenv(env_var);
+    if (!envp)
+        return std::vector<std::string>();
+    return split_string(std::string(envp), /* delim = */ ',');
+}
 
 std::string addPrefixToFilename(const std::string &filePath, const std::string &prefix)
 {
@@ -140,6 +188,20 @@ inline bool operator<(const InsHook &lhs, const InsHook &rhs)
 
 PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &MAM)
 {
+    if (env_var_set("PATCHING_VARIABLES"))
+    {
+        for (std::string s : parse_env_var_list("PATCHING_VARIABLES"))
+        {
+            dbgs() << "Parsed patching variable: " << s << "\n";
+            int pos = s.find_first_of(':');
+            if (pos == std::string::npos)
+                continue;
+            std::string file = s.substr(0, pos);
+            std::string var = s.substr(pos + 1);
+            patchingVariables.push_back(std::make_tuple(file, var));
+        }
+    }
+
     bool module_modified = false;
 
     module_modified |= initializeFuzzingStub(M);
@@ -226,50 +288,6 @@ void FuzztructionSourcePass::recordPatchPointInfo(Instruction &I)
     }
 
     patchPointInfoList.push_back(info);
-}
-
-/*
-Split a string containing multiple comma-separated keywords
-and return the set of these keywords
-*/
-std::vector<std::string> split_string(std::string s, char delim)
-{
-    size_t pos_start = 0, pos_end;
-    std::string token;
-    std::vector<std::string> res;
-
-    while ((pos_end = s.find(delim, pos_start)) != std::string::npos)
-    {
-        token = s.substr(pos_start, pos_end - pos_start);
-        pos_start = pos_end + 1;
-        res.push_back(token);
-    }
-
-    res.push_back(s.substr(pos_start));
-    return res;
-}
-
-/*
-Check if an environment variable is set.
-*/
-bool env_var_set(const char *env_var)
-{
-    const char *envp = std::getenv(env_var);
-    if (envp)
-        return true;
-    return false;
-}
-
-/*
-Convert environment variable content to a set.
-Expects comma-separated list of values in the env var.
-*/
-std::vector<std::string> parse_env_var_list(const char *env_var)
-{
-    const char *envp = std::getenv(env_var);
-    if (!envp)
-        return std::vector<std::string>();
-    return split_string(std::string(envp), /* delim = */ ',');
 }
 
 /*
@@ -530,6 +548,27 @@ We recommend to set a probability, at least for random (to avoid instrumenting t
 */
 bool FuzztructionSourcePass::injectPatchPoints(Module &M)
 {
+    std::vector<std::string> patchingVariableNames;
+    if (!patchingVariables.empty())
+    {
+        // Check whether the module file name is in the patchingVariable list
+        std::string fileName = fs::path(M.getName().str()).filename().string();
+        for (auto &pv : patchingVariables)
+        {
+            if (fileName == std::get<0>(pv))
+            {
+                dbgs() << "FT: File " << fileName << " is in the specified patchingVariable list\n";
+                patchingVariableNames.push_back(std::get<1>(pv));
+            }
+        }
+
+        if (patchingVariableNames.empty())
+        {
+            dbgs() << "FT: File " << fileName << " is not in the specified patchingVariable list\n";
+            return false;
+        }
+    }
+
     /* Get the patchpoint intrinsic */
     Function *stackmap_intr = Intrinsic::getDeclaration(&M,
                                                         Intrinsic::experimental_patchpoint_void);
@@ -606,9 +645,19 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M)
                                     // is unknown.
                                     // Attaching the type information to the operand would be promising.
                                     continue;
+                                }   
+                                dbgs() << "FT: load_op->getPointerOperand()->getName().str(): " << load_op->getPointerOperand()->getName().str() << "\n";
+                                auto IValueName = load_op->getPointerOperand()->getName();
+                                for (auto &pvn : patchingVariableNames)
+                                {
+                                    auto lowerIValueName = IValueName.lower();
+                                    if (lowerIValueName.find(pvn) != std::string::npos)
+                                    {
+                                        ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                                        recordPatchPointInfo(I);
+                                        break;
+                                    }
                                 }
-                                ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
-                                recordPatchPointInfo(I);
                             }
                         }
                         break;
