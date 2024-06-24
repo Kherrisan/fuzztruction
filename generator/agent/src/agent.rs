@@ -98,17 +98,17 @@ pub extern "C" fn __ft_auto_init() {
     if !INIT_DONE.swap(true, Ordering::SeqCst) {
         start_forkserver();
     }
-    let pid = unsafe { libc::getpid() };
-    let maps = get_process_maps(pid as Pid).unwrap();
-    for map in maps {
-        println!(
-            "Filename {:?} Address {} Size {} flags {}",
-            map.filename(),
-            map.start(),
-            map.size(),
-            map.flags
-        );
-    }
+    // let pid = unsafe { libc::getpid() };
+    // let maps = get_process_maps(pid as Pid).unwrap();
+    // for map in maps {
+    //     println!(
+    //         "Filename {:?} Address {} Size {} flags {}",
+    //         map.filename(),
+    //         map.start(),
+    //         map.size(),
+    //         map.flags
+    //     );
+    // }
 }
 
 /// Update our globally stored mappings in `PROC_MAPPINGS`. Must be called each
@@ -264,7 +264,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
         );
 
         if entry.msk_len() > 0 {
-            // log::trace!("Mutations are enabled for {:?}", entry);
+            log::trace!("Mutations are enabled for {:?}", entry);
             let mutation_stub = agent.jit.gen_mutation(&entry, true);
             let mutation_stub = match mutation_stub {
                 Ok(e) => e,
@@ -280,7 +280,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
         }
 
         if entry.is_flag_set(MutationCacheEntryFlags::TracingEnabled) {
-            // log:: log::trace!("Tracing is enabled for {:?}", entry);
+            log::trace!("Tracing is enabled for {:?}", entry);
             // Tracing for this entry was requested.
 
             // We pass our own id as argument to the callback.
@@ -440,7 +440,7 @@ fn process_messages() {
             ReceivableMessages::RunMessage(msg) => {
                 if let ProcessType::CHILD = run(&mut agent, &msg) {
                     std::mem::forget(agent);
-                    print_fds();
+                    // print_fds();
                     return;
                 }
                 println!("Child is terminated, agent continues");

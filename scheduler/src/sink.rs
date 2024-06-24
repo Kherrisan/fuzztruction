@@ -142,7 +142,7 @@ pub struct AflSink {
     #[allow(unused)]
     stderr_file: Option<(File, PathBuf)>,
     // The pid of the sink forked child process.
-    child_pid: Option<i32>,
+    pub child_pid: Option<i32>,
     stop_signal: Arc<RwLock<bool>>,
     /// Whether to log the output written to stdout. If false, the output is discarded.
     log_stdout: bool,
