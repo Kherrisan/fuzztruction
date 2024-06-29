@@ -34,7 +34,7 @@ const CALL_DST_REG: DwarfReg = DwarfReg::R11;
 #[derive(Debug, Clone, Copy)]
 /// An argument that is passed to a function.
 pub enum FunctionArg {
-    Constant(u64),
+    Constant(u32),
     Register(DwarfReg),
 }
 
@@ -577,10 +577,11 @@ impl<'a> Jit<'a> {
             4 => {
                 // We use the super register (e.g., EAX -> RAX) if we have
                 // a 4 byte target, because applying the mask down below with
-                // xor EAX, [msk] causes the upper for bytes to be cleared
+                // xor EAX, [msk] causes the upper four bytes to be cleared
                 // which is not intended. This only works if the msk buffer
                 // contain 4 trailing zero bytes that can be "used" as msk for
                 // the upper 4 bytes that we actually do not want to mutate.
+                // See https://stackoverflow.com/questions/11177137/why-do-x86-64-instructions-on-32-bit-registers-zero-the-upper-part-of-the-full-6
                 mce.dwarf_regnum().name()
             }
             _ => mce

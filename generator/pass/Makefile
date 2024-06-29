@@ -22,7 +22,7 @@ clean:
 
 # The llvm pass that injects patchpoints during compilation.
 fuzztruction-source-llvm-pass.so: fuzztruction-source-llvm-pass.cc fuzztruction-preprocessing-pass.cc
-	$(CXX) $(CLANG_CFL) -fPIC -shared $^ -o $@ $(CLANG_LFL)
+	$(CXX) $(CLANG_CFL) -lrt -fPIC -shared $^ -o $@ $(CLANG_LFL)
 
 # Wrapper around clang that injects our custom runtime and llvm pass during compilitation
 # of an arbitrary target.

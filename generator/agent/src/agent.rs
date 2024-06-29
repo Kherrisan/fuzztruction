@@ -1,6 +1,5 @@
 use fuzztruction_shared::messages;
 use fuzztruction_shared::tracing::TraceMap;
-use fuzztruction_shared::util::print_fds;
 use fuzztruction_shared::{
     communication_channel::{CommunicationChannel, CommunicationChannelError},
     constants::ENV_LOG_LEVEL,
@@ -27,7 +26,7 @@ use std::{
     },
 };
 
-use proc_maps::{self, get_process_maps, Pid};
+use proc_maps::{self};
 
 use crate::{
     jit::{self, Jit, JitError},
@@ -181,7 +180,7 @@ pub fn start_forkserver() {
         HANDSHAKE_TIMEOUT,
     )
     .expect("Failed to send HelloMessage.");
-    debug!("HelloMessage send");
+    debug!("HelloMessage sent");
 
     process_messages();
 }
@@ -190,7 +189,7 @@ pub fn start_forkserver() {
 /// By calling this function and passing the value `id`, the calling patch point
 /// reports that it was executed once.
 #[no_mangle]
-pub unsafe extern "C" fn __tracing_cb(id: u64) {
+pub unsafe extern "C" fn __tracing_cb(id: u32) {
     // ! NOTE: This code is called in patch point contexts. This might be
     // ! problematic if we trash registers that are expected to be untouched.
     // ! Wether this is an issue depens on the way LLVM treats live values that
@@ -284,7 +283,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             // Tracing for this entry was requested.
 
             // We pass our own id as argument to the callback.
-            let id: u64 = entry.id().into();
+            let id: u32 = entry.id().into();
             let args = vec![jit::FunctionArg::Constant(id)];
 
             let tracing_stub = agent.jit.gen_call(
@@ -375,6 +374,10 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
             // Prevent the child from messing with the mutation cache. However, keep it mapped,
             // for accessing the mutation masks and updating runtime vars.
             agent.mutation_cache.make_private().unwrap();
+
+            env::set_var("FAKE_TIME", "@2024-06-25 16:00:00");
+            env::set_var("FAKE_RANDOM", "1");
+
             return ProcessType::CHILD;
         }
 

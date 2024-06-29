@@ -1,7 +1,6 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
-#include "llvm/Support/Debug.h"
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
@@ -28,7 +27,6 @@
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Attributes.h>
 
-#include <llvm/Support/Debug.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/IRReader/IRReader.h>
@@ -44,10 +42,15 @@
 #include <map>
 #include <filesystem>
 #include <string>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "config.hpp"
 
 #include "fuzztruction-preprocessing-pass.hpp"
+
+#define DEBUG_TYPE "ft-patchpoint"
 
 using namespace llvm;
 namespace fs = std::filesystem;
@@ -85,6 +88,9 @@ typedef struct
     unsigned int line;
 } PatchPointInfo;
 
+#define SHM_NAME "/pingu_pass_patchpoint_id_atomic"
+#define SHM_SIZE sizeof(std::atomic<int>)
+
 class FuzztructionSourcePass : public PassInfoMixin<FuzztructionSourcePass>
 {
 public:
@@ -92,10 +98,13 @@ public:
     static bool allow_vec_ty;
     static std::string insTyNames[9];
 
+    FuzztructionSourcePass();
+    ~FuzztructionSourcePass();
+
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
     bool initializeFuzzingStub(Module &M);
     bool injectPatchPoints(Module &M);
-    std::vector<Value *> getPatchpointArgs(Module &M, uint32_t id);
+    std::vector<Value *> getPatchpointArgs(Module &M, uint64_t id);
     bool instrumentInsArg(Module &M, Function *stackmap_intr, Instruction *ins, uint8_t op_idx);
     bool instrumentInsOutput(Module &M, Function *stackmap_intr, Instruction *ins);
     bool maybeDeleteFunctionCall(Module &M, CallInst *call_ins, std::set<std::string> &target_functions);
@@ -106,6 +115,10 @@ public:
 private:
     std::vector<std::tuple<std::string, std::string>> patchingVariables;
     std::vector<PatchPointInfo> patchPointInfoList;
+
+    int shmFD;
+    void *shmPtr;
+    unsigned int *ppIdAtomic;
 };
 
 /*
@@ -186,13 +199,54 @@ inline bool operator<(const InsHook &lhs, const InsHook &rhs)
     return lhs.type < rhs.type;
 }
 
+FuzztructionSourcePass::FuzztructionSourcePass()
+{
+    shmFD = shm_open(SHM_NAME, O_RDWR | O_CREAT, 0666);
+    if (shmFD == -1)
+    {
+        perror("shm_open");
+        exit(1);
+    }
+
+    int ft = ftruncate(shmFD, SHM_SIZE);
+    if (ft < 0)
+    {
+        perror("ftruncate");
+        close(shmFD);
+        exit(1);
+    }
+
+    shmPtr = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shmFD, 0);
+    if (shmPtr == MAP_FAILED)
+    {
+        perror("mmap");
+        close(shmFD);
+        exit(1);
+    }
+
+    // Access the atomic integer in shared memory
+    ppIdAtomic = reinterpret_cast<unsigned int *>(shmPtr);
+    if (ppIdAtomic == nullptr)
+    {
+        perror("reinterpret_cast");
+        close(shmFD);
+        exit(1);
+    }
+}
+
+FuzztructionSourcePass::~FuzztructionSourcePass()
+{
+    close(shmFD);
+}
+
 PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &MAM)
 {
+    dbgs() << "FT: FuzztructionSourcePass run on file: " << M.getSourceFileName() << "\n";
     if (env_var_set("PATCHING_VARIABLES"))
     {
         for (std::string s : parse_env_var_list("PATCHING_VARIABLES"))
         {
-            dbgs() << "Parsed patching variable: " << s << "\n";
+            dbgs() << "FT: Parsed patching variable: " << s << "\n";
             int pos = s.find_first_of(':');
             if (pos == std::string::npos)
                 continue;
@@ -212,7 +266,7 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
     {
         // Dump the PatchPointInfos into the file: .SROUCE_FILE_NAME.pgpp.csv
         auto fileName = addPrefixToFilename(M.getSourceFileName() + ".pgpp.csv", ".");
-        std::ofstream file(fileName);
+        std::ofstream file(fileName, std::ios::trunc);
         file << "insTy, func, line" << std::endl;
         if (!file)
         {
@@ -225,6 +279,8 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
         }
         file.close();
     }
+
+    dbgs() << "FT: Current global patchpoint id: " << __atomic_load_n(ppIdAtomic, __ATOMIC_SEQ_CST) << "\n";
 
     if (module_modified)
     {
@@ -384,7 +440,7 @@ bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_i
             errs() << "Cannot delete " << callee->getName() << " as it returns\n";
             return false;
         }
-        dbgs() << "deleteFunctionCalls(): Deleting call to " << callee->getName() << "\n";
+        dbgs() << "FT: deleteFunctionCalls(): Deleting call to " << callee->getName() << "\n";
         call_ins->eraseFromParent();
         return true;
     }
@@ -395,7 +451,7 @@ bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_i
 Get vector of default patchpoint arguments we need for every patchpoint.
 ID is set depending on which type of instruction is instrumented.
 */
-std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint32_t id)
+std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint64_t id)
 {
     IntegerType *i64_type = IntegerType::getInt64Ty(M.getContext());
     IntegerType *i32_type = IntegerType::getInt32Ty(M.getContext());
@@ -450,8 +506,11 @@ bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_i
         @llvm.experimental.patchpoint.void(i64 <id>, i32 <numBytes>,
                                             i8* <target>, i32 <numArgs>, ...)
     */
-    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, ins->getOpcode());
-
+    uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
+    // Higher 32 bit is id
+    // Lower 32 bit is ins type
+    uint64_t id_ins = (id << 32) | ins->getOpcode();
+    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id_ins);
     patchpoint_args.push_back(ins);
     ins_builder.CreateCall(stackmap_intr, patchpoint_args);
 
@@ -476,7 +535,11 @@ bool FuzztructionSourcePass::instrumentInsArg(Module &M, Function *stackmap_intr
         @llvm.experimental.patchpoint.void(i64 <id>, i32 <numBytes>,
                                             i8* <target>, i32 <numArgs>, ...)
     */
-    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, ins->getOpcode());
+    uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
+    // Higher 32 bit is id
+    // Lower 32 bit is ins type
+    uint64_t id_ins = (id << 32) | ins->getOpcode();
+    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id_ins);
 
     /* We want to modify argument at op_idx (e.g., 0 for stores) */
     patchpoint_args.push_back(ins->getOperand(op_idx));
@@ -645,18 +708,25 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M)
                                     // is unknown.
                                     // Attaching the type information to the operand would be promising.
                                     continue;
-                                }   
-                                dbgs() << "FT: load_op->getPointerOperand()->getName().str(): " << load_op->getPointerOperand()->getName().str() << "\n";
-                                auto IValueName = load_op->getPointerOperand()->getName();
-                                for (auto &pvn : patchingVariableNames)
+                                }
+                                if (env_var_set("PATCHING_VARIABLES"))
                                 {
-                                    auto lowerIValueName = IValueName.lower();
-                                    if (lowerIValueName.find(pvn) != std::string::npos)
+                                    auto IValueName = load_op->getPointerOperand()->getName();
+                                    for (auto &pvn : patchingVariableNames)
                                     {
-                                        ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
-                                        recordPatchPointInfo(I);
-                                        break;
+                                        auto lowerIValueName = IValueName.lower();
+                                        if (lowerIValueName.find(pvn) != std::string::npos)
+                                        {
+                                            ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                                            recordPatchPointInfo(I);
+                                            break;
+                                        }
                                     }
+                                }
+                                else
+                                {
+                                    ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                                    recordPatchPointInfo(I);
                                 }
                             }
                         }

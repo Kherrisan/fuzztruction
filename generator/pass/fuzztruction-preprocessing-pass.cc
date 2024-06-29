@@ -105,8 +105,8 @@ bool FuzztructionSourcePreprocesssingPass::replaceMemFunctions(Module &M)
         LLVM_DEBUG(dbgs() << "FT DEBUG: Cloning " << new_name << "\n");
         // TODO: we assume at most 8 return leafs?
         SmallVector<ReturnInst *, 8> Returns;
-        dbgs() << "FT DEBUG: newFunc.getParent() = " << NewF->getParent() << "\n";
-        dbgs() << "FT DEBUG: oldFunc.getParent() = " << F.getParent() << "\n";
+        LLVM_DEBUG(dbgs() << "FT DEBUG: newFunc.getParent() = " << NewF->getParent() << "\n");
+        LLVM_DEBUG(dbgs() << "FT DEBUG: oldFunc.getParent() = " << F.getParent() << "\n");
         CloneFunctionInto(NewF, &F, VMap, CloneFunctionChangeType::DifferentModule, Returns);
         modified = true;
 
