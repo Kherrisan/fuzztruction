@@ -14,6 +14,7 @@ pass.
 #include <stdint.h>
 #include "debug.h"
 #include <assert.h>
+#include <sys/wait.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -26,6 +27,7 @@ typedef struct
     bool is_64bit;
     bool x_set;
     bool o_set;
+    const char *input_file;
 } arg_settings_t;
 
 typedef struct
@@ -107,6 +109,7 @@ arg_settings_t *parse_argv(char const *argv[], int argc)
     }
     free(argv0);
 
+    bool lastIsFlag = true;
     while (argc--)
     {
         const char *cur = *(argv++);
@@ -117,15 +120,60 @@ arg_settings_t *parse_argv(char const *argv[], int argc)
             self->is_64bit = true;
         if (!strcmp(cur, "-x"))
             self->x_set = true;
-        if (!strcmp(cur, "-o"))
-            self->o_set = true;
+        if (cur[0] == '-' && cur[1] != 'c')
+        {
+            // ignore the -c flag
+            lastIsFlag = true;
+        }
+        else
+        {
+            if (!lastIsFlag)
+            {
+                self->input_file = cur;
+            }
+            lastIsFlag = false;
+        }
     }
+
+    // printf("input file is %s\n", self->input_file);
 
     return self;
 }
 
-args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
+char *change_extension_to_ll(const char *filename)
 {
+    // Find the last occurrence of '.'
+    const char *dot = strrchr(filename, '.');
+    size_t length = strlen(filename);
+    char *new_filename = (char *)malloc(length + 4); // +3 for .ll and +1 for the null terminator
+    if (!new_filename)
+    {
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (dot)
+    {
+        // Copy the part before the dot
+        strncpy(new_filename, filename, dot - filename);
+        new_filename[dot - filename] = '\0';
+
+        // Append .ll
+        strcat(new_filename, ".ll");
+    }
+    else
+    {
+        // If there's no dot, just append .ll to the original filename
+        strcpy(new_filename, filename);
+        strcat(new_filename, ".ll");
+    }
+
+    return new_filename;
+}
+
+void compile(int argc, const char *argv[], arg_settings_t *arg_settings, bool to_llvm_ir)
+{
+    const char *llvm_ir_file;
     const int max_args = argc + 64;
     args_t *self = malloc(sizeof(*self));
     self->argc = 0;
@@ -137,6 +185,19 @@ args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
     // Ignore unkown args
     self->argv[self->argc++] = "-Qunused-arguments";
 
+    if (to_llvm_ir)
+    {
+        // Compile to llvm IR code
+        self->argv[self->argc++] = "-S";
+        self->argv[self->argc++] = "-emit-llvm";
+
+        // Run our pass
+        char *pass_plugin_arg = malloc(strlen(pass_path) + 64);
+        sprintf(pass_plugin_arg, "-fpass-plugin=%s", pass_path);
+        self->argv[self->argc++] = "-Xclang";
+        self->argv[self->argc++] = pass_plugin_arg;
+    }
+
     // Make sure llvm does not use builtins, since we want to
     // replace all calls with out custom instrumented implementations.
     self->argv[self->argc++] = "-fno-builtin-memcpy";
@@ -146,12 +207,6 @@ args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
 
     // self->argv[self->argc++] = "-mno-sse2";
     self->argv[self->argc++] = "-mno-avx";
-
-    // Run our pass
-    char *pass_plugin_arg = malloc(strlen(pass_path) + 64);
-    sprintf(pass_plugin_arg, "-fpass-plugin=%s", pass_path);
-    self->argv[self->argc++] = "-Xclang";
-    self->argv[self->argc++] = pass_plugin_arg;
 
     self->argv[self->argc++] = "-fno-discard-value-names";
 
@@ -164,9 +219,40 @@ args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
             current++;
             continue;
         }
-
-        self->argv[self->argc++] = *current;
-        current++;
+        if (to_llvm_ir)
+        {
+            // Compile src/source.c or cc or cpp to src/source.ll
+            if (!strcmp(*current, "-emit-obj") || !strcmp(*current, "-c"))
+            {
+                current++;
+                continue;
+            }
+            if (!strcmp(*current, "-o"))
+            {
+                // printf("found -o\n");
+                llvm_ir_file = change_extension_to_ll(arg_settings->input_file);
+                // printf("llvm_ir_file: %s\n", llvm_ir_file);
+                self->argv[self->argc++] = "-o";
+                self->argv[self->argc++] = llvm_ir_file;
+                current += 2;
+                continue;
+            }
+            self->argv[self->argc++] = *current;
+            current++;
+        }
+        else
+        {
+            // Compile source.ll to source.o or obj
+            if (!strcmp(*current, arg_settings->input_file))
+            {
+                llvm_ir_file = change_extension_to_ll(*current);
+                self->argv[self->argc++] = llvm_ir_file;
+                current++;
+                continue;
+            }
+            self->argv[self->argc++] = *current;
+            current++;
+        }
     }
 
     // Link against our agent that is called by a call our pass injected into main().
@@ -175,15 +261,55 @@ args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
     self->argv[self->argc++] = "-lgenerator_agent";
 
     // Enable debug output.
-    self->argv[self->argc++] = "-v";
     self->argv[self->argc] = NULL;
-    return self;
+
+    int pid = fork();
+    if (pid == 0)
+    {
+        int ret = execvp(self->argv[0], (char **)self->argv);
+        if (ret != 0)
+        {
+            if (to_llvm_ir)
+            {
+                fprintf(stderr, "Error in compiling to %s", llvm_ir_file);
+                PFATAL("Failed to execute %s\n", self->argv[0]);
+            }
+            else
+            {
+                fprintf(stderr, "Error in compiling from %s", llvm_ir_file);
+                PFATAL("Failed to execute %s\n", self->argv[0]);
+            }
+        }
+    }
+    else if (pid > 0)
+    {
+        int status;
+        waitpid(pid, &status, 0);
+        if (status != 0)
+        {
+            fprintf(stderr, "Error in executing in the child process\n");
+            fprintf(stderr, "Child exited with %d\n", status);
+            exit(1);
+        }
+    }
+    else
+    {
+        fprintf(stderr, "Error in executing in the child process\n");
+        exit(1);
+    }
 }
 
 int main(int argc, char const *argv[])
 {
+    // printf("raw arguments:\n");
+    // printf("#argc=%d\n", argc);
+    // for (int i = 0; i < argc; i++)
+    // {
+    //     printf("#[%d]=%s\n", i, argv[i]);
+    // }
+    // fflush(NULL);
+
     arg_settings_t *arg_settings;
-    args_t *new_args;
 
     if (argc < 2)
     {
@@ -199,7 +325,10 @@ int main(int argc, char const *argv[])
     /* Parse the flags intended for clang and deduce information we might need */
     arg_settings = parse_argv(argv, argc);
 
-    new_args = rewrite_argv(argv, argc, arg_settings);
+    compile(argc, argv, arg_settings, true);
+    compile(argc, argv, arg_settings, false);
+
+    // new_args = rewrite_argv(argv, argc, arg_settings);
     free(arg_settings);
 
     // printf("rewritten call:\n");
@@ -209,9 +338,9 @@ int main(int argc, char const *argv[])
     // }
     // fflush(NULL);
 
-    execvp(new_args->argv[0], (char **)new_args->argv);
+    // execvp(new_args->argv[0], (char **)new_args->argv);
 
-    PFATAL("Failed to execute %s\n", new_args->argv[0]);
+    // PFATAL("Failed to execute %s\n", new_args->argv[0]);
 
     return 0;
 }
