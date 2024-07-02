@@ -114,7 +114,7 @@ public:
 
 private:
     std::vector<std::tuple<std::string, std::string>> patchingVariables;
-    std::vector<PatchPointInfo> patchPointInfoList;
+    std::vector<PatchPointInfo> PatchPointInfoList;
 
     int shmFD;
     void *shmPtr;
@@ -256,13 +256,13 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
         }
     }
 
-    bool module_modified = false;
+    bool ModuleModified = false;
 
-    module_modified |= initializeFuzzingStub(M);
-    module_modified |= injectPatchPoints(M);
-    module_modified |= filterInvalidPatchPoints(M);
+    ModuleModified |= initializeFuzzingStub(M);
+    ModuleModified |= injectPatchPoints(M);
+    ModuleModified |= filterInvalidPatchPoints(M);
 
-    if (patchPointInfoList.size() > 0)
+    if (PatchPointInfoList.size() > 0)
     {
         // Dump the PatchPointInfos into the file: .SROUCE_FILE_NAME.pgpp.csv
         auto fileName = addPrefixToFilename(M.getSourceFileName() + ".pgpp.csv", ".");
@@ -273,7 +273,7 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
             errs() << "Failed to open file " << fileName << " for writing\n";
             exit(1);
         }
-        for (auto &info : patchPointInfoList)
+        for (auto &info : PatchPointInfoList)
         {
             file << info.insTy << ", " << info.func << ", " << info.line << std::endl;
         }
@@ -282,7 +282,13 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
 
     dbgs() << "FT: Current global patchpoint id: " << __atomic_load_n(ppIdAtomic, __ATOMIC_SEQ_CST) << "\n";
 
-    if (module_modified)
+    std::error_code ErrorCode;
+    std::string ModuleFileName = M.getSourceFileName();
+    raw_fd_ostream OutputFile(ModuleFileName.append(".ll"), ErrorCode);
+    M.print(OutputFile, NULL);
+    OutputFile.close();
+
+    if (ModuleModified)
     {
         return PreservedAnalyses::none();
     }
@@ -343,7 +349,7 @@ void FuzztructionSourcePass::recordPatchPointInfo(Instruction &I)
         info.insTy = "RANDOM";
     }
 
-    patchPointInfoList.push_back(info);
+    PatchPointInfoList.push_back(info);
 }
 
 /*
@@ -507,10 +513,11 @@ bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_i
                                             i8* <target>, i32 <numArgs>, ...)
     */
     uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
+    dbgs() << "FT: Inserting patchpoint with id: " << id << "\n";
     // Higher 32 bit is id
     // Lower 32 bit is ins type
-    uint64_t id_ins = (id << 32) | ins->getOpcode();
-    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id_ins);
+    // uint64_t id_ins = (id << 32) | ins->getOpcode();
+    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id);
     patchpoint_args.push_back(ins);
     ins_builder.CreateCall(stackmap_intr, patchpoint_args);
 
@@ -536,10 +543,11 @@ bool FuzztructionSourcePass::instrumentInsArg(Module &M, Function *stackmap_intr
                                             i8* <target>, i32 <numArgs>, ...)
     */
     uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
+    dbgs() << "FT: Inserting patchpoint with id " << id << ": " << M.getSourceFileName() << "\n";
     // Higher 32 bit is id
     // Lower 32 bit is ins type
-    uint64_t id_ins = (id << 32) | ins->getOpcode();
-    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id_ins);
+    // uint64_t id_ins = (id << 32) | ins->getOpcode();
+    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id);
 
     /* We want to modify argument at op_idx (e.g., 0 for stores) */
     patchpoint_args.push_back(ins->getOperand(op_idx));
