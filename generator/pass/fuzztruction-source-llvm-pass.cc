@@ -27,7 +27,6 @@
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Attributes.h>
 
-#include <llvm/Support/Debug.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/IRReader/IRReader.h>
@@ -43,13 +42,20 @@
 #include <map>
 #include <filesystem>
 #include <string>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "config.hpp"
 
 #include "fuzztruction-preprocessing-pass.hpp"
 
+#define DEBUG_TYPE "ft-patchpoint"
+
 using namespace llvm;
 namespace fs = std::filesystem;
+
+// static cl::opt<std::string> PatchingVariable("patching-variable", cl::desc("Specify the variable name and the source file name to be patched"), cl::value_desc("pvar"));
 
 /*
 We need the following capabilites:
@@ -82,6 +88,9 @@ typedef struct
     unsigned int line;
 } PatchPointInfo;
 
+#define SHM_NAME "/pingu_pass_patchpoint_id_atomic"
+#define SHM_SIZE sizeof(std::atomic<int>)
+
 class FuzztructionSourcePass : public PassInfoMixin<FuzztructionSourcePass>
 {
 public:
@@ -89,10 +98,13 @@ public:
     static bool allow_vec_ty;
     static std::string insTyNames[9];
 
+    FuzztructionSourcePass();
+    ~FuzztructionSourcePass();
+
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
     bool initializeFuzzingStub(Module &M);
     bool injectPatchPoints(Module &M);
-    std::vector<Value *> getPatchpointArgs(Module &M, uint32_t id);
+    std::vector<Value *> getPatchpointArgs(Module &M, uint64_t id);
     bool instrumentInsArg(Module &M, Function *stackmap_intr, Instruction *ins, uint8_t op_idx);
     bool instrumentInsOutput(Module &M, Function *stackmap_intr, Instruction *ins);
     bool maybeDeleteFunctionCall(Module &M, CallInst *call_ins, std::set<std::string> &target_functions);
@@ -101,7 +113,12 @@ public:
     void recordPatchPointInfo(Instruction &I);
 
 private:
+    std::vector<std::tuple<std::string, std::string>> patchingVariables;
     std::vector<PatchPointInfo> patchPointInfoList;
+
+    int shmFD;
+    void *shmPtr;
+    unsigned int *ppIdAtomic;
 };
 
 /*
@@ -118,6 +135,50 @@ struct InsHook
                ", probability=" + std::to_string(probability) + "% }";
     }
 };
+
+/*
+Split a string containing multiple comma-separated keywords
+and return the set of these keywords
+*/
+std::vector<std::string> split_string(std::string s, char delim)
+{
+    size_t pos_start = 0, pos_end;
+    std::string token;
+    std::vector<std::string> res;
+
+    while ((pos_end = s.find(delim, pos_start)) != std::string::npos)
+    {
+        token = s.substr(pos_start, pos_end - pos_start);
+        pos_start = pos_end + 1;
+        res.push_back(token);
+    }
+
+    res.push_back(s.substr(pos_start));
+    return res;
+}
+
+/*
+Check if an environment variable is set.
+*/
+bool env_var_set(const char *env_var)
+{
+    const char *envp = std::getenv(env_var);
+    if (envp)
+        return true;
+    return false;
+}
+
+/*
+Convert environment variable content to a set.
+Expects comma-separated list of values in the env var.
+*/
+std::vector<std::string> parse_env_var_list(const char *env_var)
+{
+    const char *envp = std::getenv(env_var);
+    if (!envp)
+        return std::vector<std::string>();
+    return split_string(std::string(envp), /* delim = */ ',');
+}
 
 std::string addPrefixToFilename(const std::string &filePath, const std::string &prefix)
 {
@@ -138,8 +199,63 @@ inline bool operator<(const InsHook &lhs, const InsHook &rhs)
     return lhs.type < rhs.type;
 }
 
+FuzztructionSourcePass::FuzztructionSourcePass()
+{
+    shmFD = shm_open(SHM_NAME, O_RDWR | O_CREAT, 0666);
+    if (shmFD == -1)
+    {
+        perror("shm_open");
+        exit(1);
+    }
+
+    int ft = ftruncate(shmFD, SHM_SIZE);
+    if (ft < 0)
+    {
+        perror("ftruncate");
+        close(shmFD);
+        exit(1);
+    }
+
+    shmPtr = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shmFD, 0);
+    if (shmPtr == MAP_FAILED)
+    {
+        perror("mmap");
+        close(shmFD);
+        exit(1);
+    }
+
+    // Access the atomic integer in shared memory
+    ppIdAtomic = reinterpret_cast<unsigned int *>(shmPtr);
+    if (ppIdAtomic == nullptr)
+    {
+        perror("reinterpret_cast");
+        close(shmFD);
+        exit(1);
+    }
+}
+
+FuzztructionSourcePass::~FuzztructionSourcePass()
+{
+    close(shmFD);
+}
+
 PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &MAM)
 {
+    dbgs() << "FT: FuzztructionSourcePass run on file: " << M.getSourceFileName() << "\n";
+    if (env_var_set("PATCHING_VARIABLES"))
+    {
+        for (std::string s : parse_env_var_list("PATCHING_VARIABLES"))
+        {
+            dbgs() << "FT: Parsed patching variable: " << s << "\n";
+            int pos = s.find_first_of(':');
+            if (pos == std::string::npos)
+                continue;
+            std::string file = s.substr(0, pos);
+            std::string var = s.substr(pos + 1);
+            patchingVariables.push_back(std::make_tuple(file, var));
+        }
+    }
+
     bool module_modified = false;
 
     module_modified |= initializeFuzzingStub(M);
@@ -150,7 +266,7 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
     {
         // Dump the PatchPointInfos into the file: .SROUCE_FILE_NAME.pgpp.csv
         auto fileName = addPrefixToFilename(M.getSourceFileName() + ".pgpp.csv", ".");
-        std::ofstream file(fileName);
+        std::ofstream file(fileName, std::ios::trunc);
         file << "insTy, func, line" << std::endl;
         if (!file)
         {
@@ -163,6 +279,8 @@ PreservedAnalyses FuzztructionSourcePass::run(Module &M, ModuleAnalysisManager &
         }
         file.close();
     }
+
+    dbgs() << "FT: Current global patchpoint id: " << __atomic_load_n(ppIdAtomic, __ATOMIC_SEQ_CST) << "\n";
 
     if (module_modified)
     {
@@ -226,50 +344,6 @@ void FuzztructionSourcePass::recordPatchPointInfo(Instruction &I)
     }
 
     patchPointInfoList.push_back(info);
-}
-
-/*
-Split a string containing multiple comma-separated keywords
-and return the set of these keywords
-*/
-std::vector<std::string> split_string(std::string s, char delim)
-{
-    size_t pos_start = 0, pos_end;
-    std::string token;
-    std::vector<std::string> res;
-
-    while ((pos_end = s.find(delim, pos_start)) != std::string::npos)
-    {
-        token = s.substr(pos_start, pos_end - pos_start);
-        pos_start = pos_end + 1;
-        res.push_back(token);
-    }
-
-    res.push_back(s.substr(pos_start));
-    return res;
-}
-
-/*
-Check if an environment variable is set.
-*/
-bool env_var_set(const char *env_var)
-{
-    const char *envp = std::getenv(env_var);
-    if (envp)
-        return true;
-    return false;
-}
-
-/*
-Convert environment variable content to a set.
-Expects comma-separated list of values in the env var.
-*/
-std::vector<std::string> parse_env_var_list(const char *env_var)
-{
-    const char *envp = std::getenv(env_var);
-    if (!envp)
-        return std::vector<std::string>();
-    return split_string(std::string(envp), /* delim = */ ',');
 }
 
 /*
@@ -366,7 +440,7 @@ bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_i
             errs() << "Cannot delete " << callee->getName() << " as it returns\n";
             return false;
         }
-        dbgs() << "deleteFunctionCalls(): Deleting call to " << callee->getName() << "\n";
+        dbgs() << "FT: deleteFunctionCalls(): Deleting call to " << callee->getName() << "\n";
         call_ins->eraseFromParent();
         return true;
     }
@@ -377,7 +451,7 @@ bool FuzztructionSourcePass::maybeDeleteFunctionCall(Module &M, CallInst *call_i
 Get vector of default patchpoint arguments we need for every patchpoint.
 ID is set depending on which type of instruction is instrumented.
 */
-std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint32_t id)
+std::vector<Value *> FuzztructionSourcePass::getPatchpointArgs(Module &M, uint64_t id)
 {
     IntegerType *i64_type = IntegerType::getInt64Ty(M.getContext());
     IntegerType *i32_type = IntegerType::getInt32Ty(M.getContext());
@@ -432,8 +506,11 @@ bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_i
         @llvm.experimental.patchpoint.void(i64 <id>, i32 <numBytes>,
                                             i8* <target>, i32 <numArgs>, ...)
     */
-    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, ins->getOpcode());
-
+    uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
+    // Higher 32 bit is id
+    // Lower 32 bit is ins type
+    uint64_t id_ins = (id << 32) | ins->getOpcode();
+    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id_ins);
     patchpoint_args.push_back(ins);
     ins_builder.CreateCall(stackmap_intr, patchpoint_args);
 
@@ -458,7 +535,11 @@ bool FuzztructionSourcePass::instrumentInsArg(Module &M, Function *stackmap_intr
         @llvm.experimental.patchpoint.void(i64 <id>, i32 <numBytes>,
                                             i8* <target>, i32 <numArgs>, ...)
     */
-    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, ins->getOpcode());
+    uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
+    // Higher 32 bit is id
+    // Lower 32 bit is ins type
+    uint64_t id_ins = (id << 32) | ins->getOpcode();
+    std::vector<Value *> patchpoint_args = getPatchpointArgs(M, id_ins);
 
     /* We want to modify argument at op_idx (e.g., 0 for stores) */
     patchpoint_args.push_back(ins->getOperand(op_idx));
@@ -530,6 +611,27 @@ We recommend to set a probability, at least for random (to avoid instrumenting t
 */
 bool FuzztructionSourcePass::injectPatchPoints(Module &M)
 {
+    std::vector<std::string> patchingVariableNames;
+    if (!patchingVariables.empty())
+    {
+        // Check whether the module file name is in the patchingVariable list
+        std::string fileName = fs::path(M.getName().str()).filename().string();
+        for (auto &pv : patchingVariables)
+        {
+            if (fileName == std::get<0>(pv))
+            {
+                dbgs() << "FT: File " << fileName << " is in the specified patchingVariable list\n";
+                patchingVariableNames.push_back(std::get<1>(pv));
+            }
+        }
+
+        if (patchingVariableNames.empty())
+        {
+            dbgs() << "FT: File " << fileName << " is not in the specified patchingVariable list\n";
+            return false;
+        }
+    }
+
     /* Get the patchpoint intrinsic */
     Function *stackmap_intr = Intrinsic::getDeclaration(&M,
                                                         Intrinsic::experimental_patchpoint_void);
@@ -607,8 +709,25 @@ bool FuzztructionSourcePass::injectPatchPoints(Module &M)
                                     // Attaching the type information to the operand would be promising.
                                     continue;
                                 }
-                                ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
-                                recordPatchPointInfo(I);
+                                if (env_var_set("PATCHING_VARIABLES"))
+                                {
+                                    auto IValueName = load_op->getPointerOperand()->getName();
+                                    for (auto &pvn : patchingVariableNames)
+                                    {
+                                        auto lowerIValueName = IValueName.lower();
+                                        if (lowerIValueName.find(pvn) != std::string::npos)
+                                        {
+                                            ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                                            recordPatchPointInfo(I);
+                                            break;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    ins_modified = instrumentInsOutput(M, stackmap_intr, &I);
+                                    recordPatchPointInfo(I);
+                                }
                             }
                         }
                         break;

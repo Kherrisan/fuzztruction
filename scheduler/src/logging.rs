@@ -7,7 +7,6 @@ use log::{self, kv::ToKey};
 use std::{
     fs, panic,
     path::{Path, PathBuf},
-    process,
     str::FromStr,
 };
 use yansi::Paint;

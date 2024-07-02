@@ -38,7 +38,7 @@ pub struct PatchPoint {
     /// is only an offset relative to `base`.
     address: u64,
     /// The patch point ID that was assigned during compilation.
-    llvm_ins: u64,
+    llvm_ins: u32,
     /// The live value that where recorded by this patch point.
     location: Location,
     /// The memory mapping this patch point belongs to.
@@ -58,11 +58,15 @@ impl PatchPoint {
     ) -> Self {
         assert!(address + base > 0);
 
+        // For llvm_id, higher 32-bit is id, lower 32-bit is ins_type
+        let id = (llvm_id >> 32) as u32;
+        let ins_type = (llvm_id & 0xFFFF_FFFF) as u32;
+
         // For now we only support a single recorded location per patch point.
         PatchPoint {
-            id: PatchPointID::get(address as usize, mapping.inode, mapping.offset),
+            id: PatchPointID::get(id, address as usize, mapping.inode, mapping.offset),
             address,
-            llvm_ins: llvm_id,
+            llvm_ins: ins_type,
             location,
             base,
             mapping,
@@ -74,7 +78,7 @@ impl PatchPoint {
         self.id
     }
 
-    pub fn llvm_ins(&self) -> u64 {
+    pub fn llvm_ins(&self) -> u32 {
         self.llvm_ins
     }
 

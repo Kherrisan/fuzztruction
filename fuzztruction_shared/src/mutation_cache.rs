@@ -40,7 +40,7 @@ pub enum MutationCacheError {
     Other(String),
 }
 
-mod backing_memory {
+pub mod backing_memory {
     use std::ffi::CString;
 
     use crate::mutation_cache_content::MutationCacheContent;

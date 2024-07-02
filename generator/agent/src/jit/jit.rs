@@ -34,7 +34,7 @@ const CALL_DST_REG: DwarfReg = DwarfReg::R11;
 #[derive(Debug, Clone, Copy)]
 /// An argument that is passed to a function.
 pub enum FunctionArg {
-    Constant(u64),
+    Constant(u32),
     Register(DwarfReg),
 }
 
@@ -209,7 +209,7 @@ impl CallableFunction for NativeFunction {
 pub struct FunctionInstance {
     asm: Vec<String>,
     /// Number of arguments this function expects.
-    //arg_cnt: u8,
+    // arg_cnt: u8,
     /// The machinecode that was produced by assembling the FunctionTemplate.
     machine_code: Vec<u8>,
     vma: Option<VAddr>,
@@ -232,7 +232,7 @@ impl FunctionInstance {
         assert!(self.machine_code.len() > 0);
         self.vma = Some((dst.as_ptr() as u64).into());
 
-        //eprintln!("write_safe: {:#?}", self);
+        // eprintln!("write_safe: {:#?}", self);
 
         dst[0..self.machine_code.len()].copy_from_slice(&self.machine_code)
     }
@@ -306,16 +306,16 @@ impl FunctionTemplate {
 
         // Assemble
         let asm_str = asm.join("\n");
-        //eprintln!("Assembling:\n-----\n{}\n-----", &asm_str);
+        // eprintln!("Assembling:\n-----\n{}\n-----", &asm_str);
         let res = ks.asm(asm_str, 0);
-        //eprintln!("res={:#?}", res);
+        // eprintln!("res={:#?}", res);
         match res {
             Err(e) => {
                 log::error!("Error while assembling {}", e);
                 None
             }
             Ok(e) => {
-                //eprintln!("{:#?}", e);
+                // eprintln!("{:#?}", e);
                 Some((asm, e.bytes.clone()))
             }
         }
@@ -565,7 +565,7 @@ impl<'a> Jit<'a> {
         mce: &MutationCacheEntry,
         is_callee: bool,
     ) -> Result<FunctionTemplate, JitError> {
-        //eprintln!("gen_mutation_gpr_xmm: reg={:#?}, mce: {:#?}", reg, mce);
+        // eprintln!("gen_mutation_gpr_xmm: reg={:#?}, mce: {:#?}", reg, mce);
         let mut asm = Vec::<String>::new();
 
         let is_xmm = XMM_REGISTERS.contains(&mce.dwarf_regnum());
@@ -577,10 +577,11 @@ impl<'a> Jit<'a> {
             4 => {
                 // We use the super register (e.g., EAX -> RAX) if we have
                 // a 4 byte target, because applying the mask down below with
-                // xor EAX, [msk] causes the upper for bytes to be cleared
+                // xor EAX, [msk] causes the upper four bytes to be cleared
                 // which is not intended. This only works if the msk buffer
                 // contain 4 trailing zero bytes that can be "used" as msk for
                 // the upper 4 bytes that we actually do not want to mutate.
+                // See https://stackoverflow.com/questions/11177137/why-do-x86-64-instructions-on-32-bit-registers-zero-the-upper-part-of-the-full-6
                 mce.dwarf_regnum().name()
             }
             _ => mce

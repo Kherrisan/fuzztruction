@@ -15,7 +15,7 @@ pub struct Trace {
 }
 
 impl Trace {
-    pub fn from_trace_entries(msgs: &[TraceEntry<u64>]) -> Trace {
+    pub fn from_trace_entries(msgs: &[TraceEntry<u32>]) -> Trace {
         let mut exec_cnt = HashMap::new();
         let mut exec_order = HashMap::new();
         let mut skipping = 0;

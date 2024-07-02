@@ -26,7 +26,7 @@ use std::{
     },
 };
 
-use proc_maps;
+use proc_maps::{self};
 
 use crate::{
     jit::{self, Jit, JitError},
@@ -97,6 +97,17 @@ pub extern "C" fn __ft_auto_init() {
     if !INIT_DONE.swap(true, Ordering::SeqCst) {
         start_forkserver();
     }
+    // let pid = unsafe { libc::getpid() };
+    // let maps = get_process_maps(pid as Pid).unwrap();
+    // for map in maps {
+    //     println!(
+    //         "Filename {:?} Address {} Size {} flags {}",
+    //         map.filename(),
+    //         map.start(),
+    //         map.size(),
+    //         map.flags
+    //     );
+    // }
 }
 
 /// Update our globally stored mappings in `PROC_MAPPINGS`. Must be called each
@@ -169,7 +180,7 @@ pub fn start_forkserver() {
         HANDSHAKE_TIMEOUT,
     )
     .expect("Failed to send HelloMessage.");
-    debug!("HelloMessage send");
+    debug!("HelloMessage sent");
 
     process_messages();
 }
@@ -178,7 +189,7 @@ pub fn start_forkserver() {
 /// By calling this function and passing the value `id`, the calling patch point
 /// reports that it was executed once.
 #[no_mangle]
-pub unsafe extern "C" fn __tracing_cb(id: u64) {
+pub unsafe extern "C" fn __tracing_cb(id: u32) {
     // ! NOTE: This code is called in patch point contexts. This might be
     // ! problematic if we trash registers that are expected to be untouched.
     // ! Wether this is an issue depens on the way LLVM treats live values that
@@ -241,7 +252,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
     let tracing_cb_fn = jit::NativeFunction::from_fn(__tracing_cb as usize, 1);
 
     for entry in entries.iter() {
-        //log::trace!("Processing: {:?}", &entry);
+        // log::trace!("Processing: {:?}", &entry);
         let mut callables = Vec::new();
 
         // Having no mask and tracing disabled renders a MutationCacheEntry useless.
@@ -252,7 +263,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
         );
 
         if entry.msk_len() > 0 {
-            //log::trace!("Mutations are enabled for {:?}", entry);
+            log::trace!("Mutations are enabled for {:?}", entry);
             let mutation_stub = agent.jit.gen_mutation(&entry, true);
             let mutation_stub = match mutation_stub {
                 Ok(e) => e,
@@ -263,16 +274,16 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             };
 
             let stub = agent.jit.allocate(mutation_stub).unwrap();
-            //log::trace!("Mutation Stub: {:#?}", stub);
+            // log::trace!("Mutation Stub: {:#?}", stub);
             callables.push(stub);
         }
 
         if entry.is_flag_set(MutationCacheEntryFlags::TracingEnabled) {
-            // log:: log::trace!("Tracing is enabled for {:?}", entry);
+            log::trace!("Tracing is enabled for {:?}", entry);
             // Tracing for this entry was requested.
 
             // We pass our own id as argument to the callback.
-            let id: u64 = entry.id().into();
+            let id: u32 = entry.id().into();
             let args = vec![jit::FunctionArg::Constant(id)];
 
             let tracing_stub = agent.jit.gen_call(
@@ -287,10 +298,11 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             // Notify the trace map that the given vma might report a execution hit
             // during tracing.
             let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-            trace_map_guard
-                .as_mut()
-                .unwrap()
-                .alloc_slot(entry.id().into());
+            if let Some(trace_map) = trace_map_guard.as_mut() {
+                trace_map.alloc_slot(entry.id().into());
+            } else {
+                log::error!("TRACE_MAP is not initialized!")
+            }
         }
 
         if !callables.is_empty() {
@@ -304,7 +316,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
                 let patchpoint_stub = agent.jit.gen_call(&multiplexer, vec![], false, None);
                 unsafe {
                     let mut f = agent.jit.assemble(patchpoint_stub).unwrap();
-                    //log::trace!("Writing patch point stub {:#?} @ {:?}", f, entry.vma());
+                    // log::trace!("Writing patch point stub {:#?} @ {:?}", f, entry.vma());
                     f.write(entry.vma().into())
                 }
             } else {
@@ -362,6 +374,10 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
             // Prevent the child from messing with the mutation cache. However, keep it mapped,
             // for accessing the mutation masks and updating runtime vars.
             agent.mutation_cache.make_private().unwrap();
+
+            env::set_var("FAKE_TIME", "@2024-06-25 16:00:00");
+            env::set_var("FAKE_RANDOM", "1");
+
             return ProcessType::CHILD;
         }
 
@@ -372,6 +388,7 @@ fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
                 let ret = waitpid(pid, &mut child_status, 0);
                 assert!(ret == pid);
             }
+            log::debug!("Child {} terminated with raw status: {}", pid, child_status);
 
             if libc::WIFEXITED(child_status) {
                 terminated_msg.exit_code = libc::WEXITSTATUS(child_status);
@@ -426,6 +443,7 @@ fn process_messages() {
             ReceivableMessages::RunMessage(msg) => {
                 if let ProcessType::CHILD = run(&mut agent, &msg) {
                     std::mem::forget(agent);
+                    // print_fds();
                     return;
                 }
                 println!("Child is terminated, agent continues");

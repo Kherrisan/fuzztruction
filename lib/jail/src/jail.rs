@@ -126,7 +126,7 @@ impl Jail {
 
         // Make sure mounts to /tmp are visible in this mount NS and the unshared
         // one.
-        //Jail::mount(&["--make-shared", "/tmp"]).context("Failed to make /tmp shared")?;
+        // Jail::mount(&["--make-shared", "/tmp"]).context("Failed to make /tmp shared")?;
 
         // Unshare the mount namescpace
         let ret = unsafe { libc::unshare(libc::CLONE_NEWNS) };
@@ -154,7 +154,7 @@ impl Jail {
 
         if self.builder.no_random_devices {
             // Mount /dev/zero in place of the listed devices.
-            for dst in ["hwrng", "random", "urandom"] {
+            for dst in ["random", "urandom"] {
                 Jail::mount(&["-o", "bind", "/dev/zero", &format!("/dev/{}", dst)])
                     .context(format!("Failed to mount /dev/zero to {}", dst))?;
             }

@@ -510,10 +510,7 @@ impl Source {
         Ok(())
     }
 
-    pub fn build(
-        config: &Config,
-        id: Option<usize>,
-    ) -> Result<Source> {
+    pub fn build(config: &Config, id: Option<usize>) -> Result<Source> {
         let source = Source::from_config(config, id)?;
 
         Ok(source)
@@ -685,6 +682,7 @@ impl Source {
                         libc::close(fd);
                     }
 
+                    log::debug!("Redirecting stderr to {:?}", self.stderr_file);
                     if self.log_stderr {
                         let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
                         libc::dup2(fd, libc::STDERR_FILENO);
@@ -743,14 +741,14 @@ impl Source {
                         }
                         panic!("Failed to disable ASLR");
                     }
-
-                    std::env::set_current_dir(&self.config.as_ref().unwrap().sink.cwd)
-                        .expect("Failed to set workdir");
+                    
                     if let Some(ref mut jail) = self.jail {
                         // ! Make sure that the code in `enter()` is async-signal-safe since we
                         // ! are the forked child of a multithreaded application.
                         jail.enter().unwrap();
                     }
+                    std::env::set_current_dir(&self.config.as_ref().unwrap().source.cwd)
+                        .expect("Failed to set workdir");
 
                     // Path of the source binary.
                     let source_binary_path = CString::new(path.as_bytes()).unwrap();
@@ -759,6 +757,8 @@ impl Source {
                     // ! Make sure that UID == EUID, since if this is not the case,
                     // ! ld will ignore LD_PRELOAD which we need to use for targets
                     // ! that normally load instrumented libraries during runtime.
+                    println!("{}", nix::unistd::getuid());
+                    println!("{}", nix::unistd::geteuid());
                     assert_eq!(nix::unistd::getuid(), nix::unistd::geteuid());
                     assert_eq!(nix::unistd::getegid(), nix::unistd::getegid());
 
@@ -865,7 +865,10 @@ impl Source {
 
         let removed_cnt = old_size - patch_points.len();
         if removed_cnt > 0 {
-            log::warn!("Removed {} patch points during filtering duplicated vmas.", removed_cnt);
+            log::warn!(
+                "Removed {} patch points during filtering duplicated vmas.",
+                removed_cnt
+            );
         }
     }
 

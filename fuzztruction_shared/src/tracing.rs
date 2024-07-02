@@ -14,7 +14,7 @@ pub struct TraceMap {
     // struct field and impl should be consistent with StdMapObserver
     header: *mut TraceMapHeader,
     _shared_memory: MmapShMem,
-    allocated_slots: HashSet<u64>,
+    allocated_slots: HashSet<u32>,
     total_hits: u64,
 }
 
@@ -53,7 +53,7 @@ impl TraceMap {
     }
 
     pub fn new(len: usize) -> Result<TraceMap> {
-        let total_size = size_of::<TraceMapHeader>() + len * size_of::<TraceEntry<u64>>();
+        let total_size = size_of::<TraceMapHeader>() + len * size_of::<TraceEntry<u32>>();
         let mut shared_memory = MmapShMem::new_shmem(total_size, "trace")?;
         let header = TraceMapHeader::new(true, len, &mut shared_memory)?;
 
@@ -97,7 +97,7 @@ impl TraceMap {
             }
         };
         let len =
-            (shared_memory.size() - size_of::<TraceMapHeader>()) / size_of::<TraceEntry<u64>>();
+            (shared_memory.size() - size_of::<TraceMapHeader>()) / size_of::<TraceEntry<u32>>();
         let header = TraceMapHeader::new(false, len, &mut shared_memory)?;
 
         Ok(TraceMap {
@@ -108,11 +108,11 @@ impl TraceMap {
         })
     }
 
-    pub fn alloc_slot(&mut self, id: u64) {
+    pub fn alloc_slot(&mut self, id: u32) {
         self.allocated_slots.insert(id);
     }
 
-    pub fn hit(&mut self, id: u64) {
+    pub fn hit(&mut self, id: u32) {
         let idx = self
             .entries_slice()
             .binary_search_by(|e| e.value.cmp(&id))
@@ -130,28 +130,28 @@ impl TraceMap {
         entry.hits += 1;
     }
 
-    fn entry(&self, idx: usize) -> Option<&TraceEntry<u64>> {
+    fn entry(&self, idx: usize) -> Option<&TraceEntry<u32>> {
         if idx >= self.len() {
             return None;
         }
         let entry = unsafe {
             let ptr = self
                 .data_ptr()
-                .offset((idx * size_of::<TraceEntry<u64>>()) as isize);
-            &*(ptr as *const TraceEntry<u64>)
+                .offset((idx * size_of::<TraceEntry<u32>>()) as isize);
+            &*(ptr as *const TraceEntry<u32>)
         };
         Some(entry)
     }
 
-    fn entry_mut(&mut self, idx: usize) -> Option<&mut TraceEntry<u64>> {
+    fn entry_mut(&mut self, idx: usize) -> Option<&mut TraceEntry<u32>> {
         if idx >= self.len() {
             return None;
         }
         let entry = unsafe {
             let ptr = self
                 .data_mut_ptr()
-                .offset((idx * size_of::<TraceEntry<u64>>()) as isize);
-            &mut *(ptr as *mut TraceEntry<u64>)
+                .offset((idx * size_of::<TraceEntry<u32>>()) as isize);
+            &mut *(ptr as *mut TraceEntry<u32>)
         };
         Some(entry)
     }
@@ -178,13 +178,13 @@ impl TraceMap {
         }
     }
 
-    pub fn entries_slice(&self) -> &[TraceEntry<u64>] {
-        unsafe { slice::from_raw_parts(self.data_ptr() as *const TraceEntry<u64>, self.len()) }
+    pub fn entries_slice(&self) -> &[TraceEntry<u32>] {
+        unsafe { slice::from_raw_parts(self.data_ptr() as *const TraceEntry<u32>, self.len()) }
     }
 
-    pub fn entries_mut(&mut self) -> &mut [TraceEntry<u64>] {
+    pub fn entries_mut(&mut self) -> &mut [TraceEntry<u32>] {
         unsafe {
-            slice::from_raw_parts_mut(self.data_mut_ptr() as *mut TraceEntry<u64>, self.len())
+            slice::from_raw_parts_mut(self.data_mut_ptr() as *mut TraceEntry<u32>, self.len())
         }
     }
 
@@ -212,12 +212,12 @@ impl TraceMap {
 pub struct TraceMapHeader {
     capacity: usize,
     len: usize,
-    data: [TraceEntry<u64>; 0],
+    data: [TraceEntry<u32>; 0],
 }
 
 impl TraceMapHeader {
     pub fn new(create: bool, len: usize, memory: &mut MmapShMem) -> Result<*mut Self> {
-        assert!(memory.size() >= size_of::<TraceEntry<u64>>());
+        assert!(memory.size() >= size_of::<TraceEntry<u32>>());
 
         unsafe {
             let header: &mut TraceMapHeader = memory.as_object_mut();
