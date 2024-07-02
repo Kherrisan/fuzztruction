@@ -12,8 +12,9 @@ use fuzztruction_shared::{
 
 use proc_maps::{self, MapRange};
 
-use crate::llvm_stackmap::{Location, StackMap};
+use llvm_stackmap::{Location, StackMap};
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// See /usr/include/llvm/IR/Instruction.def for further more IDs
@@ -55,23 +56,28 @@ impl PatchPoint {
         location: Location,
         mapping: MapRange,
         function_address: u64,
-    ) -> Self {
+    ) -> Result<Self> {
         assert!(address + base > 0);
 
         // For llvm_id, higher 32-bit is id, lower 32-bit is ins_type
-        let id = (llvm_id >> 32) as u32;
-        let ins_type = (llvm_id & 0xFFFF_FFFF) as u32;
+        // let id = (llvm_id >> 32) as u32;
+        // let ins_type = (llvm_id & 0xFFFF_FFFF) as u32;
 
-        // For now we only support a single recorded location per patch point.
-        PatchPoint {
-            id: PatchPointID::get(id, address as usize, mapping.inode, mapping.offset),
-            address,
-            llvm_ins: ins_type,
-            location,
+        PatchPointID::get(
+            llvm_id as u32,
+            address as usize,
+            mapping.inode,
+            mapping.offset,
+        )
+        .map(|id| Self {
+            id,
             base,
+            address,
+            llvm_ins: 0,
+            location,
             mapping,
             function_address,
-        }
+        })
     }
 
     pub fn id(&self) -> PatchPointID {
@@ -170,20 +176,26 @@ pub fn from_stackmap(
                     );
                 }
 
-                let pp = PatchPoint::new(
+                if let Ok(pp) = PatchPoint::new(
                     base,
                     vma,
                     record.patch_point_id,
                     *location,
                     mapping.clone(),
                     function_address,
-                );
+                ) {
+                    patch_points.push(pp);
+                } else {
+                    log::warn!(
+                        "Ignoring duplicated PatchPointID: {}",
+                        record.patch_point_id
+                    );
+                }
 
                 // if !seen_vmas.insert(pp.vma()) {
                 //     let other = patch_points.iter().find(|p: &&PatchPoint| p.vma() == pp.vma()).unwrap();
                 //     panic!("Duplicated VMA A={:#?}\nB={:#?}", pp, other);
                 // }
-                patch_points.push(pp);
             })
         });
         idx += function.record_count as usize;

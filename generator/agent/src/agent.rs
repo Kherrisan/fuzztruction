@@ -279,7 +279,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
         }
 
         if entry.is_flag_set(MutationCacheEntryFlags::TracingEnabled) {
-            log::trace!("Tracing is enabled for {:?}", entry);
+            // log::trace!("Tracing is enabled for {:?}", entry);
             // Tracing for this entry was requested.
 
             // We pass our own id as argument to the callback.

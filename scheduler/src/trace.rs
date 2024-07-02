@@ -4,7 +4,7 @@ use fuzztruction_shared::{messages::TracePointStat, tracing::TraceEntry, types::
 use serde::{Deserialize, Serialize};
 
 #[allow(unused)]
-const TRACE_EXEC_CNT_LIMIT: u64 = 16384;
+const TRACE_EXEC_CNT_LIMIT: u64 = 0x1000;
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Trace {

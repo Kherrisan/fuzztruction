@@ -124,19 +124,19 @@ impl MutationCache {
         self.content().total_used_bytes()
     }
 
-    fn content(&self) -> &MutationCacheContent {
+    pub fn content(&self) -> &MutationCacheContent {
         unsafe { &*self.content.0 }
     }
 
-    fn content_mut(&mut self) -> &mut MutationCacheContent {
+    pub fn content_mut(&mut self) -> &mut MutationCacheContent {
         unsafe { &mut *(self.content.0 as *mut MutationCacheContent) }
     }
 
-    fn content_slice(&self) -> &[u8] {
+    pub fn content_slice(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.content.0 as *const u8, self.content_size) }
     }
 
-    fn content_slice_mut(&self) -> &mut [u8] {
+    pub fn content_slice_mut(&self) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.content.0 as *mut u8, self.content_size) }
     }
 
@@ -354,9 +354,15 @@ impl MutationCache {
     }
 
     pub fn try_clone(&self) -> Result<MutationCache> {
-        let mut ret = MutationCache::new()?;
-        let data = self.content_slice();
-        ret.load_bytes(data)?;
+        let ret = MutationCache::new()?;
+        let bytes = self.content_slice();
+        ret.content_slice_mut()[..bytes.len()].copy_from_slice(bytes);
+        unsafe {
+            // Update the size since we might loaded the content from a differently
+            // sized cache.
+            (&mut *(ret.content.0 as *mut MutationCacheContent)).update(ret.content_size);
+        }
+
         Ok(ret)
     }
 }
@@ -386,21 +392,26 @@ impl MutationCache {
     pub fn load_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         assert!(bytes.len() <= self.content_size);
 
-        self.content_slice_mut()[..bytes.len()].copy_from_slice(bytes);
-        unsafe {
-            // Update the size since we might loaded the content from a differently
-            // sized cache.
-            (&mut *(self.content.0 as *mut MutationCacheContent)).update(self.content_size);
-        }
+        // self.content_slice_mut()[..bytes.len()].copy_from_slice(bytes);
+        // unsafe {
+        //     // Update the size since we might loaded the content from a differently
+        //     // sized cache.
+        //     (&mut *(self.content.0 as *mut MutationCacheContent)).update(self.content_size);
+        // }
+
+        self.content_mut().load_consolidate_bytes(bytes);
         Ok(())
     }
 
     pub fn save_bytes(&mut self) -> Vec<u8> {
         // Remove whiteouts to reduce size
         self.content_mut().consolidate();
-        let content_meta = self.content();
+
+        // let content_meta = self.content();
         // Only copy bytes that actually contain information.
-        self.content_slice()[0..content_meta.total_used_bytes()].to_vec()
+        // self.content_slice()[0..content_meta.total_used_bytes()].to_vec()
+
+        self.content().consolidate_bytes()
     }
 
     pub fn from_iter<'a>(

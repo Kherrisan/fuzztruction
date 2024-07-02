@@ -435,12 +435,12 @@ impl Drop for FlipBit<'_> {
 pub struct U8Counter<'a> {
     /// The buffer we are mutating.
     mce: Rc<RefCell<&'a mut MutationCacheEntry>>,
-    next_byte: usize,
+    pub next_byte: usize,
     /// Index of the last byte we mutated.
     last_byte_idx: Option<usize>,
     /// The original value of the byte that we mutated.
     last_byte_orig_value: u8,
-    ctr: u8,
+    pub ctr: u8,
 }
 
 impl U8Counter<'_> {
@@ -509,13 +509,15 @@ impl Iterator for U8Counter<'_> {
 
         // Mutate
         mask[self.next_byte] ^= self.ctr;
-        match self.ctr.checked_add(1) {
-            Some(v) => self.ctr = v,
-            _ => {
-                self.ctr = 0;
-                self.next_byte += 1;
-            }
-        }
+        // TODO:
+        // match self.ctr.checked_add(1) {
+        //     Some(v) => self.ctr = v,
+        //     _ => {
+        //         self.ctr = 0;
+        //         self.next_byte += 1;
+        //     }
+        // }
+        self.next_byte += 1;
 
         Some(())
     }

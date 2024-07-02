@@ -71,7 +71,7 @@ const MAX_OUTPUT_SIZE: u64 = n_mib_bytes!(1) as u64;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3600 * 24);
 
 #[cfg(not(feature = "never-timeout"))]
-const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(10);
+const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(feature = "never-timeout")]
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -741,7 +741,7 @@ impl Source {
                         }
                         panic!("Failed to disable ASLR");
                     }
-                    
+
                     if let Some(ref mut jail) = self.jail {
                         // ! Make sure that the code in `enter()` is async-signal-safe since we
                         // ! are the forked child of a multithreaded application.

@@ -1,3 +1,4 @@
+use anyhow::Result;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Mutex};
@@ -19,16 +20,19 @@ impl PatchPointID {
         base_offset: usize,
         inode: usize,
         section_file_offset: usize,
-    ) -> PatchPointID {
+    ) -> Result<PatchPointID> {
         let mut map = PATCH_POINT_ID_MAP.lock().unwrap();
         let key = (base_offset, inode, section_file_offset);
         let pp = PatchPointID(id);
+        if map.values().find(|v| pp.0 == v.0).is_some() {
+            return Err(anyhow::anyhow!("PatchPointID already exists"));
+        }
         let had_pp = map.insert(key, pp.clone());
         assert!(
             had_pp.is_none(),
             "There was already an entry for the given key!"
         );
-        pp
+        Ok(pp)
     }
 
     pub fn invalid() -> PatchPointID {

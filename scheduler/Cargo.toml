@@ -32,6 +32,7 @@ posixmq = "~0"
 rand = "~0.8"
 nix = { version = "0.26", features = ["user"] }
 proc-maps = { path = "../lib/proc-maps" }
+llvm_stackmap = { path = "../lib/llvm-stackmap-rs", features = ["serde"] }
 shared_memory = { git = "https://github.com/elast0ny/shared_memory-rs", rev = "4879c7641f64d444420b81fd32f496939ee7155d", package = "shared_memory" }
 mktemp = "~0"
 tempfile = "~3"
@@ -69,7 +70,6 @@ itertools = "~0"
 glob = "0.3.0"
 flate2 = "1.0.22"
 fs_extra = "1.2.0"
-llvm_stackmap = { version = "0.1.4", features = ["serde"] }
 yansi = "~1"
 # LibAFL
 libafl = { version = "0.11.2", features = ["prometheus_monitor"] }

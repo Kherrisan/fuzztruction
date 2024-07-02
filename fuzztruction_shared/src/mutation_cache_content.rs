@@ -31,6 +31,64 @@ pub struct MutationCacheContent {
 }
 
 impl MutationCacheContent {
+    pub fn consolidate_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&self.total_size.to_le_bytes());
+        bytes.extend_from_slice(&self.current_data_size.to_le_bytes());
+        bytes.extend_from_slice(&self.next_free_slot.to_le_bytes());
+        bytes.extend_from_slice(&self.pending_deletions.to_le_bytes());
+        self.entry_decriptor_tbl
+            .iter()
+            .take(self.next_free_slot)
+            .for_each(|d| {
+                assert!(
+                    d.is_some(),
+                    "After consolidation, the first next_free_slot descriptors all must be Some"
+                );
+                bytes.extend_from_slice(&d.unwrap().start_offset.to_le_bytes());
+            });
+        let data_bytes =
+            unsafe { from_raw_parts(self.data().as_ptr() as *const u8, self.current_data_size) };
+        bytes.extend_from_slice(data_bytes);
+        bytes
+    }
+
+    pub fn load_consolidate_bytes(&mut self, bytes: &[u8]) {
+        let mut offset = 0;
+        self.total_size = usize::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        self.current_data_size =
+            usize::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        self.next_free_slot = usize::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        self.pending_deletions =
+            usize::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        assert!(
+            bytes.len() - offset >= self.next_free_slot * mem::size_of::<EntryDescriptor>(),
+            "Not enough bytes for entry descriptors",
+        );
+
+        for i in 0..self.next_free_slot {
+            let start_offset = usize::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            self.entry_decriptor_tbl[i] = Some(EntryDescriptor { start_offset });
+        }
+
+        assert!(
+            bytes.len() - offset >= self.current_data_size,
+            "Not enough bytes for data"
+        );
+
+        let data_bytes = &bytes[offset..];
+        let data_ptr = self.data().as_ptr() as *mut u8;
+        unsafe {
+            ptr::copy_nonoverlapping(data_bytes.as_ptr(), data_ptr, self.current_data_size);
+        }
+    }
+
     fn data(&self) -> &MutationCacheEntry {
         let addr = &self.data as *const MutationCacheEntry;
         let data_slice = unsafe { from_raw_parts(addr, 1) };

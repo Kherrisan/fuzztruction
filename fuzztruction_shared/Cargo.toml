@@ -22,7 +22,7 @@ fern = "~0"
 md5 = "0.7.0"
 nix = { version = "0.26", features = ["signal"] }
 byte-unit = "4.0.13"
-llvm_stackmap = { version = "0.1.4", features = ["serde"] }
+llvm_stackmap = { path = "../lib/llvm-stackmap-rs", features = ["serde"] }
 ipmpsc = "~0"
 ansi_term = "0.12"
 chrono = "~0"
