@@ -115,8 +115,8 @@ impl ValgrindManager {
         termination_requested_flag: Arc<AtomicBool>,
     ) -> Result<ValgrindManager> {
         let target_args = config.sink.arguments.clone();
-        let target_binary = config.vanilla.bin_path.clone();
-        let env = config.vanilla.env.clone();
+        let target_binary = config.gcov.bin_path.clone();
+        let env = config.gcov.env.clone();
         if !target_binary.exists() {
             return Err(anyhow::anyhow!("Target binary does not exist!"));
         }

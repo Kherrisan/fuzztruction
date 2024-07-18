@@ -186,10 +186,8 @@ pub fn from_stackmap(
                 ) {
                     patch_points.push(pp);
                 } else {
-                    log::warn!(
-                        "Ignoring duplicated PatchPointID: {}",
-                        record.patch_point_id
-                    );
+                    log::error!("Duplicated PatchPointID: {}", record.patch_point_id);
+                    panic!("Duplicated PatchPointID: {}", record.patch_point_id)
                 }
 
                 // if !seen_vmas.insert(pp.vma()) {

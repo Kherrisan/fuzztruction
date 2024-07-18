@@ -49,6 +49,15 @@ impl FromStr for FromStrDuration {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+pub struct MonitorConfig {
+    pub url: String,
+    pub org: String,
+    pub bucket: String,
+    pub token: String,
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SourceConfig {
     pub env: Vec<(String, String)>,
     /// Path to the Source binary.
@@ -201,7 +210,7 @@ pub struct SinkConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct VanillaConfig {
+pub struct GcovConfig {
     /// Environment used during binary
     pub env: Vec<(String, String)>,
     /// Path to the vanilla binary
@@ -303,11 +312,12 @@ pub struct Config {
     /// Attributes related to the sink application.
     pub sink: SinkConfig,
     /// Attributes related to the vanilla application.
-    pub vanilla: VanillaConfig,
+    pub gcov: GcovConfig,
     /// Attributes related to AFL++ fuzzer
     pub aflpp: Option<AflPlusPlusConfig>,
     /// Attrbiutes realted to the SymCC fuzzer.
     pub symcc: Option<SymccConfig>,
+    pub monitor: MonitorConfig,
 }
 
 #[derive(Debug, Error)]
@@ -351,7 +361,7 @@ pub trait TargetExecutionContext: Debug {
 
 pub trait AflTargetExecutionContext: TargetExecutionContext {}
 
-impl TargetExecutionContext for VanillaConfig {
+impl TargetExecutionContext for GcovConfig {
     fn env(&self) -> &[(String, String)] {
         self.env.as_slice()
     }
@@ -419,7 +429,7 @@ impl Validator for Config {
         self.sink
             .validate()
             .context("Failed to validate SinkConfig")?;
-        self.vanilla
+        self.gcov
             .validate()
             .context("Failed to validate VanillaConfig")?;
         Ok(())
@@ -461,7 +471,7 @@ impl Validator for SymccConfig {
     }
 }
 
-impl Validator for VanillaConfig {
+impl Validator for GcovConfig {
     fn validate(&self) -> Result<()> {
         self.bin_path
             .path_exists()
@@ -770,8 +780,9 @@ impl ConfigBuilder {
                 "afl++",
                 "source",
                 "symcc",
-                "vanilla",
+                "gcov",
                 "phases",
+                "monitor",
             ],
         )?;
 
@@ -1048,17 +1059,38 @@ impl ConfigBuilder {
         })
     }
 
-    fn parse_vanilla_section(&self, yaml: &Yaml, arguments: &[String]) -> Result<VanillaConfig> {
+    fn parse_gcov_section(&self, yaml: &Yaml, arguments: &[String]) -> Result<GcovConfig> {
         let env: Option<Vec<_>> = self.get_attribute(yaml, "env")?;
         let env = env.unwrap_or_default();
         let bin_path = self.get_attribute(yaml, "bin-path")?;
 
         ConfigBuilder::check_for_unparsed_keys(yaml, &["env", "bin-path"])?;
 
-        Ok(VanillaConfig {
+        Ok(GcovConfig {
             env,
             bin_path,
             arguments: arguments.to_owned(),
+        })
+    }
+
+    fn parse_monitor_section(&self, yaml: &Yaml) -> Result<MonitorConfig> {
+        let url = self.get_attribute(yaml, "url")?;
+        let org = self.get_attribute(yaml, "org")?;
+        let bucket = self.get_attribute(yaml, "bucket")?;
+        let token = self.get_attribute(yaml, "token")?;
+        let proxy: Option<String> = self.get_attribute(yaml, "http-proxy")?;
+
+        ConfigBuilder::check_for_unparsed_keys(
+            yaml,
+            &["url", "org", "bucket", "token", "http-proxy"],
+        )?;
+
+        Ok(MonitorConfig {
+            url,
+            org,
+            bucket,
+            token,
+            proxy,
         })
     }
 
@@ -1089,12 +1121,17 @@ impl ConfigBuilder {
         }
         let sink_config = self.parse_sink_section(sink_section)?;
 
-        let vanilla_section = &yaml["vanilla"];
-        if vanilla_section.is_badvalue() {
-            return Err(ConfigError::MissingSection("vanilla".to_owned()).into());
+        let gcov_section = &yaml["gcov"];
+        if gcov_section.is_badvalue() {
+            return Err(ConfigError::MissingSection("gcov".to_owned()).into());
         }
-        let vanilla_config =
-            self.parse_vanilla_section(vanilla_section, sink_config.arguments())?;
+        let gcov_config = self.parse_gcov_section(gcov_section, sink_config.arguments())?;
+
+        let monitor_section = &yaml["monitor"];
+        if monitor_section.is_badvalue() {
+            return Err(ConfigError::MissingSection("monitor".to_owned()).into());
+        }
+        let monitor_config = self.parse_monitor_section(monitor_section)?;
 
         let config = Config {
             general: general_config,
@@ -1103,7 +1140,8 @@ impl ConfigBuilder {
             sink: sink_config,
             aflpp: None,
             symcc: None,
-            vanilla: vanilla_config,
+            gcov: gcov_config,
+            monitor: monitor_config,
         };
         config.validate()?;
         Ok(config)

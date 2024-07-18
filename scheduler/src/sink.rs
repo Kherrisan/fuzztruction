@@ -268,10 +268,7 @@ impl AflSink {
         })
     }
 
-    pub fn build(
-        config: &Config,
-        id: Option<usize>,
-    ) -> Result<AflSink> {
+    pub fn build(config: &Config, id: Option<usize>) -> Result<AflSink> {
         let mut sink = AflSink::from_config(config, id)?;
 
         sink.afl_map_shm = None;

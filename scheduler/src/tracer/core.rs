@@ -1,4 +1,4 @@
-use crate::config::{Config, GeneralConfig, TargetExecutionContext, VanillaConfig};
+use crate::config::{Config, GeneralConfig, TargetExecutionContext, GcovConfig};
 use crate::valgrind::{backup_input, setup_input_channel, setup_output_channel};
 use anyhow::{anyhow, Result};
 use byte_unit::n_gib_bytes;
@@ -242,13 +242,13 @@ pub struct TraceManager {
     input_dirs: Vec<PathBuf>,
     exit_requested: Arc<AtomicBool>,
     general_config: GeneralConfig,
-    target_config: VanillaConfig,
+    target_config: GcovConfig,
 }
 
 impl TraceManager {
     pub fn new(
         general_config: &GeneralConfig,
-        target_config: VanillaConfig,
+        target_config: GcovConfig,
         input_dirs: Vec<PathBuf>,
         exit_requested: Arc<AtomicBool>,
     ) -> Self {
@@ -477,7 +477,7 @@ pub fn trace_interesting(
 
     let tracer = TraceManager::new(
         &config.general,
-        config.vanilla.clone(),
+        config.gcov.clone(),
         input_dirs,
         exit_requested,
     );

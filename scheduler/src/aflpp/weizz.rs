@@ -8,7 +8,7 @@ use std::{
 use std::os::unix::process::ExitStatusExt;
 
 use crate::{
-    config::{Config, VanillaConfig},
+    config::{Config, GcovConfig},
     io_channels::InputChannel,
 };
 use anyhow::anyhow;
@@ -19,12 +19,12 @@ use super::WorkerId;
 
 pub struct WeizzWorker {
     config: Config,
-    vanilla_config: VanillaConfig,
+    vanilla_config: GcovConfig,
 }
 
 impl WeizzWorker {
     pub fn new(config: Config) -> Self {
-        let vanilla_config = config.vanilla.clone();
+        let vanilla_config = config.gcov.clone();
         WeizzWorker {
             vanilla_config,
             config,
