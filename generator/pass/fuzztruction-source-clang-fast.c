@@ -36,11 +36,19 @@ typedef struct
 
 const char *PASS_SO_NAME = "fuzztruction-source-llvm-pass.so";
 char *pass_path;
+char generator_agent_linkage[1024];
 
 void find_pass()
 {
     char *guess;
     char *cwd;
+
+    char *pass_path_env = getenv("LLVM_PASS_SO");
+    if (pass_path_env != NULL && !access(pass_path_env, R_OK))
+    {
+        pass_path = pass_path_env;
+        goto done;
+    }
 
     cwd = getcwd(NULL, 0);
     if (!cwd)
@@ -132,7 +140,7 @@ args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
     self->argv = malloc(sizeof(*self->argv) * max_args);
 
     /* Inject/Replace arguments */
-    self->argv[self->argc++] = arg_settings->is_cxx ? "/data/exp/dkzou/llvm-17.0.6-ft/build/bin/clang++" : "/data/exp/dkzou/llvm-17.0.6-ft/build/bin/clang";
+    self->argv[self->argc++] = arg_settings->is_cxx ? "/usr/bin/clang++" : "/usr/bin/clang";
     // self->argv[self->argc++] = arg_settings->is_cxx ? "clang++" : "clang";
     // Ignore unkown args
     self->argv[self->argc++] = "-Qunused-arguments";
@@ -170,12 +178,20 @@ args_t *rewrite_argv(const char *argv[], int argc, arg_settings_t *arg_settings)
     }
 
     // Link against our agent that is called by a call our pass injected into main().
-    // FIXME: this path should not be absolute.
-    self->argv[self->argc++] = "-L/home/ubuntu/pingu/fuzztruction/target/debug";
-    self->argv[self->argc++] = "-lgenerator_agent";
+    char *generator_agent_dir = getenv("GENERATOR_AGENT_SO_DIR");
+    if (generator_agent_dir != NULL)
+    {
+        sprintf(generator_agent_linkage, "-L%s", generator_agent_dir);
+        self->argv[self->argc++] = generator_agent_linkage;
+    }
+    else
+    {
+        self->argv[self->argc++] = "-L/home/user/pingu/fuzztruction/target/debug";
+    }
+    self->argv[self->argc++] = "-lpingu_generator";
 
     // Enable debug output.
-    self->argv[self->argc++] = "-v";
+    // self->argv[self->argc++] = "-v";
     self->argv[self->argc] = NULL;
     return self;
 }

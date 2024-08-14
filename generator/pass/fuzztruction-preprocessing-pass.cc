@@ -60,8 +60,8 @@ bool FuzztructionSourcePreprocesssingPass::replaceMemFunctions(Module &M)
 
     LLVMContext &context = M.getContext();
 
-    // FIXME: this path should not be absolute.
-    std::unique_ptr<Module> IM = parseIRFile("/home/ubuntu/pingu/fuzztruction/generator/pass/mem_functions.ll", sm, context);
+    // TODO: this path should not be absolute.
+    std::unique_ptr<Module> IM = parseIRFile("/home/user/pingu/fuzztruction/generator/pass/mem_functions.ll", sm, context);
     LLVM_DEBUG(dbgs() << "FT DEBUG: mem_functions.ll IR file parsed\n");
     if (!IM)
     {

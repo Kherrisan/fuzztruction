@@ -216,6 +216,7 @@ pub struct GcovConfig {
     /// Path to the vanilla binary
     pub bin_path: PathBuf,
     pub arguments: Vec<String>,
+    pub src_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -239,7 +240,6 @@ pub struct GeneralConfig {
     pub purge_workdir: bool,
     pub jail_uid: Option<u32>,
     pub jail_gid: Option<u32>,
-    pub mitm_port: u16,
     pub target_port: u16,
     pub mitm_buf_size: Option<usize>,
     pub max_interactions: Option<u16>,
@@ -757,7 +757,6 @@ impl ConfigBuilder {
         let tracing_timeout = timeout.clone();
         let jail_uid = self.get_attribute(yaml, "jail-uid")?;
         let jail_gid = self.get_attribute(yaml, "jail-gid")?;
-        let mitm_port = self.get_attribute(yaml, "mitm-port")?;
         let target_port = self.get_attribute(yaml, "target-port")?;
 
         match (jail_uid, jail_gid) {
@@ -774,7 +773,6 @@ impl ConfigBuilder {
                 "timeout",
                 "jail-uid",
                 "jail-gid",
-                "mitm-port",
                 "target-port",
                 "sink",
                 "afl++",
@@ -794,7 +792,6 @@ impl ConfigBuilder {
             purge_workdir: false,
             jail_uid,
             jail_gid,
-            mitm_port,
             target_port,
             mitm_buf_size: None,
             max_interactions: None,
@@ -1063,13 +1060,15 @@ impl ConfigBuilder {
         let env: Option<Vec<_>> = self.get_attribute(yaml, "env")?;
         let env = env.unwrap_or_default();
         let bin_path = self.get_attribute(yaml, "bin-path")?;
+        let src_dir = self.get_attribute(yaml, "src-dir")?;
 
-        ConfigBuilder::check_for_unparsed_keys(yaml, &["env", "bin-path"])?;
+        ConfigBuilder::check_for_unparsed_keys(yaml, &["env", "bin-path", "src-dir"])?;
 
         Ok(GcovConfig {
             env,
             bin_path,
             arguments: arguments.to_owned(),
+            src_dir,
         })
     }
 

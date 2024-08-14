@@ -1,5 +1,5 @@
 #We only support clang, so we fix this variable!
-BASE = /data/exp/dkzou/llvm-17.0.6-ft/build
+BASE = /usr
 CC = $(BASE)/bin/clang
 CXX = $(BASE)/bin/clang++
 AR = $(BASE)/bin/llvm-ar

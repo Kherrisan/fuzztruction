@@ -522,11 +522,11 @@ impl AflSink {
                     assert_eq!(ret, 0);
 
                     // Max AS size.
-                    let mut rlim: libc::rlimit = std::mem::zeroed();
-                    rlim.rlim_cur = n_mib_bytes!(512).try_into().unwrap();
-                    rlim.rlim_max = n_mib_bytes!(512).try_into().unwrap();
-                    let ret = libc::setrlimit(libc::RLIMIT_AS, &rlim as *const libc::rlimit);
-                    assert_eq!(ret, 0);
+                    // let mut rlim: libc::rlimit = std::mem::zeroed();
+                    // rlim.rlim_cur = n_mib_bytes!(512).try_into().unwrap();
+                    // rlim.rlim_max = n_mib_bytes!(512).try_into().unwrap();
+                    // let ret = libc::setrlimit(libc::RLIMIT_AS, &rlim as *const libc::rlimit);
+                    // assert_eq!(ret, 0);
 
                     // Disable ASLR of sink, may be useless.
                     let _ = libc::personality(libc::ADDR_NO_RANDOMIZE as u64);
@@ -678,7 +678,7 @@ impl AflSink {
                 }
                 match mq_recv.receive_timeout(&mut buf, DEFAULT_SINK_RECEIVE_TIMEOUT) {
                     Ok(_) => {
-                        log::trace!("Received message from sink");
+                        log::trace!("Received message from the sink");
                         let header = MsgHeader::try_from_bytes(&buf)?;
                         if header.id != MessageType::AuxStreamMessage {
                             continue;
