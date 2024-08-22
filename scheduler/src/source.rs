@@ -501,7 +501,7 @@ impl Source {
             .stdout;
         let output = String::from_utf8(output).expect("Failed to convert stdout to UTF8.");
 
-        if output.contains("libgenerator_agent.so => not found") {
+        if output.contains("libpingu_generator.so => not found") {
             Err(SourceError::FatalError(
                 "Target failed to find some libraries/library!".to_owned(),
             ))
@@ -789,7 +789,7 @@ impl Source {
         log::debug!("Waiting for handshake message.");
         let msg = self
             .wait_for_message::<HelloMessage>(HANDSHAKE_TIMEOUT)
-            .context("Handshake error. Did the target fail to find libgenerator_agent.so or any other library it depends on? Please check the logs in the work directory. Pass --show-output (not to the subcommand) to print the targets output..")?;
+            .context("Handshake error. Did the target fail to find libpingu_generator.so or any other library it depends on? Please check the logs in the work directory. Pass --show-output (not to the subcommand) to print the targets output..")?;
         log::debug!("Got HelloMessage. Agents TID is {:?}", msg.senders_tid);
 
         // Get the `mem` file of the child thus we can modify the targets addressspace.

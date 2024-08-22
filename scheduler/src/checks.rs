@@ -63,13 +63,13 @@ fn check_if_tmp_is_tmpfs() -> Result<()> {
 fn check_if_agent_is_in_path() -> Result<()> {
     let output = Command::new("sh")
         .arg("-c")
-        .arg("ldconfig -p | grep libgenerator_agent.so")
+        .arg("ldconfig -p | grep libpingu_generator.so")
         .output()
         .expect("Failed to run command.");
 
     if !output.status.success() {
         let mut msg =
-            "Failed to find libgenerator_agent.so in ld's path. Please run the following commands:\n"
+            "Failed to find libpingu_generator.so in ld's path. Please run the following commands:\n"
                 .to_owned();
         msg.push_str("echo '/home/user/leah/target/debug' > /etc/ld.so.conf.d/fuzztruction.conf\n");
         msg.push_str("sudo ldconfig");
