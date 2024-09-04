@@ -431,7 +431,7 @@ impl Validator for Config {
             .context("Failed to validate SinkConfig")?;
         self.gcov
             .validate()
-            .context("Failed to validate VanillaConfig")?;
+            .context("Failed to validate GcovConfig")?;
         Ok(())
     }
 }

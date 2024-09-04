@@ -7,8 +7,9 @@ use std::{collections::HashMap, sync::Mutex};
 #[repr(C)]
 pub struct PatchPointID(pub u32);
 
-static PATCH_POINT_ID_INVALID: u32 = u32::MAX;
+static PATCH_POINT_ID_INVALID: u32 = 0;
 lazy_static! {
+    static ref PATCH_POINT_ID_CTR: Mutex<u32> = Mutex::new(PATCH_POINT_ID_INVALID + 1);
     static ref PATCH_POINT_ID_MAP: Mutex<HashMap<(usize, usize, usize), PatchPointID>> =
         Mutex::new(HashMap::new());
 }
@@ -16,23 +17,28 @@ lazy_static! {
 impl PatchPointID {
     // Record a reverse index map: (vma, inode, offset) -> PatchPointID
     pub fn get(
-        id: u32,
+        _id: u32,
         base_offset: usize,
         inode: usize,
         section_file_offset: usize,
     ) -> Result<PatchPointID> {
+        let mut ctr = PATCH_POINT_ID_CTR.lock().unwrap();
         let mut map = PATCH_POINT_ID_MAP.lock().unwrap();
         let key = (base_offset, inode, section_file_offset);
-        let pp = PatchPointID(id);
-        if map.values().find(|v| pp.0 == v.0).is_some() {
-            return Err(anyhow::anyhow!("PatchPointID already exists"));
-        }
-        let had_pp = map.insert(key, pp.clone());
-        assert!(
-            had_pp.is_none(),
-            "There was already an entry for the given key!"
-        );
-        Ok(pp)
+        let id = if let Some(id) = map.get(&key) {
+            id.clone()
+        } else {
+            let val = PatchPointID(*ctr);
+            let had_val = map.insert(key, val.clone());
+            assert!(
+                had_val.is_none(),
+                "There was already an entry for the given key!"
+            );
+
+            *ctr = *ctr + 1;
+            val
+        };
+        Ok(id)
     }
 
     pub fn invalid() -> PatchPointID {

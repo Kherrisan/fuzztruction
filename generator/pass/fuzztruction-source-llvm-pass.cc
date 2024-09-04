@@ -513,7 +513,7 @@ bool FuzztructionSourcePass::instrumentInsOutput(Module &M, Function *stackmap_i
                                             i8* <target>, i32 <numArgs>, ...)
     */
     uint64_t id = __atomic_fetch_add(ppIdAtomic, 1, __ATOMIC_SEQ_CST);
-    dbgs() << "FT: Inserting patchpoint with id: " << id << "\n";
+    dbgs() << "FT: Inserting patchpoint with id " << id << ": " << M.getSourceFileName() << "\n";
     // Higher 32 bit is id
     // Lower 32 bit is ins type
     // uint64_t id_ins = (id << 32) | ins->getOpcode();
