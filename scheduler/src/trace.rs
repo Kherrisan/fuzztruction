@@ -30,7 +30,7 @@ impl Trace {
                 skipping += 1;
                 return;
             }
-            if e.order.is_none() {
+            if e.value.is_none() {
                 // log::trace!(
                 //     "Skipping PatchPoint {:?} since it was executed but does not have an exec idx",
                 //     e.value
@@ -39,8 +39,8 @@ impl Trace {
                 return;
             }
 
-            exec_cnt.insert(PatchPointID(e.value), e.hits);
-            exec_order.insert(PatchPointID(e.value), e.order.unwrap().get());
+            exec_cnt.insert(PatchPointID(e.id), e.hits);
+            exec_order.insert(PatchPointID(e.id), e.value.unwrap().get());
         });
 
         log::info!(

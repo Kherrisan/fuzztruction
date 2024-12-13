@@ -12,7 +12,6 @@ use std::alloc;
 const MAX_MASK_LEN: usize = 1024 * 1024 * 64;
 
 #[repr(C)]
-#[derive(Debug)]
 pub struct MutationCacheEntryMetadata {
     /// A unique ID used to map mutation entries onto PatchPoint instances.
     /// We need this field, since the `vma` might differ between multiple
@@ -27,11 +26,29 @@ pub struct MutationCacheEntryMetadata {
     pub dwarf_regnum: dwarf::DwarfReg,
     pub offset_or_constant: i32,
 
+    pub target_value_size_bits: u32,
+
     pub read_pos: u32,
     /// The length of the mask stored at MutationCacheEntry.msk. If `loc_size` is > 0,
     /// the mask contains `loc_size` additional bytes that can be used in case the
     /// mutation stub read ptr overflows and reads more then msk_len bytes (see agent.rs).
     msk_len: u32,
+}
+
+impl std::fmt::Debug for MutationCacheEntryMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MutationCacheEntryMetadata")
+            .field("id", &self.id)
+            .field("vma", &format!("0x{:x}", self.vma))
+            .field("flags", &self.flags)
+            .field("loc_type", &self.loc_type)
+            .field("loc_size", &self.loc_size)
+            .field("dwarf_regnum", &self.dwarf_regnum)
+            .field("offset_or_constant", &self.offset_or_constant)
+            .field("read_pos", &self.read_pos)
+            .field("msk_len", &self.msk_len)
+            .finish()
+    }
 }
 
 #[repr(C)]
@@ -60,6 +77,7 @@ impl MutationCacheEntry {
         loc_size: u16,
         dwarf_regnum: dwarf::DwarfReg,
         offset_or_constant: i32,
+        target_value_size_bits: u32,
         msk_len: u32,
     ) -> Box<MutationCacheEntry> {
         assert!(msk_len < MAX_MASK_LEN as u32);
@@ -87,6 +105,7 @@ impl MutationCacheEntry {
             dwarf_regnum,
             offset_or_constant,
             read_pos: 0,
+            target_value_size_bits,
             msk_len,
         };
 
@@ -192,24 +211,33 @@ impl MutationCacheEntry {
         self.metadata.msk_len
     }
 
+    pub fn reset_flags(&mut self) -> &mut Self {
+        self.metadata.flags = MutationCacheEntryFlags::Empty as u8;
+        self
+    }
+
+    pub fn enable_debug(&mut self) -> &mut Self {
+        self.set_flag(MutationCacheEntryFlags::Debug)
+    }
+
+    pub fn disable_debug(&mut self) -> &mut Self {
+        self.unset_flag(MutationCacheEntryFlags::Debug)
+    }
+
     pub fn enable_tracing(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::TracingEnabled)
+        self.set_flag(MutationCacheEntryFlags::Tracing)
     }
 
     pub fn disable_tracing(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::TracingEnabled)
+        self.unset_flag(MutationCacheEntryFlags::Tracing)
     }
 
-    pub fn enable(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::Disable)
+    pub fn enable_mutation(&mut self) -> &mut Self {
+        self.unset_flag(MutationCacheEntryFlags::Mutation)
     }
 
-    pub fn disable(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::Disable)
-    }
-
-    pub fn enabled(&self) -> bool {
-        !self.is_flag_set(MutationCacheEntryFlags::Disable)
+    pub fn disable_mutation(&mut self) -> &mut Self {
+        self.set_flag(MutationCacheEntryFlags::Mutation)
     }
 
     pub fn set_flag(&mut self, flag: MutationCacheEntryFlags) -> &mut Self {
@@ -227,11 +255,6 @@ impl MutationCacheEntry {
 
     pub fn unset_flag(&mut self, flag: MutationCacheEntryFlags) -> &mut Self {
         self.metadata.flags &= !(flag as u8);
-        self
-    }
-
-    pub fn reset_flags(&mut self) -> &mut Self {
-        self.metadata.flags = MutationCacheEntryFlags::None as u8;
         self
     }
 

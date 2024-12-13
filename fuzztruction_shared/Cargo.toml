@@ -23,11 +23,14 @@ md5 = "0.7.0"
 nix = { version = "0.26", features = ["signal"] }
 byte-unit = "4.0.13"
 llvm_stackmap = { path = "../lib/llvm-stackmap-rs", features = ["serde"] }
+proc-maps = { path = "../lib/proc-maps" }
 ipmpsc = "~0"
 ansi_term = "0.12"
 chrono = "~0"
 libafl = { version = "0.11.2", features = ["prometheus_monitor"] }
 libafl_bolts = "0.11.2"
+elf = "0.7.4"
+bincode = "~1"
 
 [dependencies.memoffset]
 version = "~0"

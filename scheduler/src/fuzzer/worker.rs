@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     config::Config,
-    sink::AflSink,
+    sink::Sink,
     sink_bitmap::{Bitmap, BITMAP_DEFAULT_MAP_SIZE},
     source::Source,
 };
@@ -170,7 +170,7 @@ pub struct FuzzingWorker {
     /// The source that is used during fuzzing.
     pub source: Option<Source>,
     /// The sink that is used during fuzzing.
-    pub sink: Option<AflSink>,
+    pub sink: Option<Sink>,
     /// Path to the directory in which inputs that yielded new coverage are stored.
     pub interesting_inputs: PathBuf,
     /// Path to the directory in which inputs that caused crashes are stored.

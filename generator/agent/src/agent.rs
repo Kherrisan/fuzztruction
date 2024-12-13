@@ -1,5 +1,5 @@
 use fuzztruction_shared::messages;
-use fuzztruction_shared::tracing::TraceMap;
+use fuzztruction_shared::tracing::TraceVector;
 use fuzztruction_shared::{
     communication_channel::{CommunicationChannel, CommunicationChannelError},
     constants::ENV_LOG_LEVEL,
@@ -42,7 +42,7 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 pub static IS_CHILD: AtomicBool = AtomicBool::new(false);
 
 /// Map used to trace coverage and execution count of the patch points.
-static TRACE_MAP: Mutex<Option<TraceMap>> = Mutex::new(None);
+static TRACE_MAP: Mutex<Option<TraceVector>> = Mutex::new(None);
 
 lazy_static! {
     /// Mappings of the processes's virtual address space.
@@ -161,7 +161,7 @@ pub fn start_forkserver() {
         println!("fd: {fd}");
     }
 
-    match TraceMap::from_env() {
+    match TraceVector::from_env() {
         Ok(trace_map) => {
             let mut trace_map_guard = TRACE_MAP.lock().unwrap();
             trace_map.unlink();
@@ -200,10 +200,10 @@ pub unsafe extern "C" fn __tracing_cb(id: u32) {
         return;
     }
     let mut trace_map_guard = TRACE_MAP.lock().unwrap();
-    trace_map_guard
-        .as_mut()
-        .expect("Called tracing_cb without initializing TRACE_MAP")
-        .hit(id);
+    // trace_map_guard
+    //     .as_mut()
+    //     .expect("Called tracing_cb without initializing TRACE_MAP")
+    //     .hit(id);
 }
 
 /// Revert all changes applied to the binary and reapply all mutations that are
@@ -244,9 +244,9 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
     // Create a snapshot of all patch points that we might modify,
     // thus we can restore the original binary later. This will only snapshot
     // those patch points we never touched before.
-    for entry in entries.iter() {
-        agent.jit.snapshot_patch_point(entry);
-    }
+    // for entry in entries.iter() {
+    // agent.jit.snapshot_patch_point(entry);
+    // }
 
     // The function used to report patch point hits during tracing.
     let tracing_cb_fn = jit::NativeFunction::from_fn(__tracing_cb as usize, 1);
@@ -257,7 +257,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
 
         // Having no mask and tracing disabled renders a MutationCacheEntry useless.
         debug_assert!(
-            entry.is_flag_set(MutationCacheEntryFlags::TracingEnabled) || entry.msk_len() > 0,
+            entry.is_flag_set(MutationCacheEntryFlags::Tracing) || entry.msk_len() > 0,
             "entry={:#?}",
             entry
         );
@@ -278,7 +278,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             callables.push(stub);
         }
 
-        if entry.is_flag_set(MutationCacheEntryFlags::TracingEnabled) {
+        if entry.is_flag_set(MutationCacheEntryFlags::Tracing) {
             // log::trace!("Tracing is enabled for {:?}", entry);
             // Tracing for this entry was requested.
 
@@ -299,7 +299,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
             // during tracing.
             let mut trace_map_guard = TRACE_MAP.lock().unwrap();
             if let Some(trace_map) = trace_map_guard.as_mut() {
-                trace_map.alloc_slot(entry.id().into());
+                // trace_map.alloc_slot(entry.id().into());
             } else {
                 log::error!("TRACE_MAP is not initialized!")
             }
@@ -327,7 +327,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
                         .gen_call(&callables.pop().unwrap(), vec![], false, None);
                 unsafe {
                     let mut f = agent.jit.assemble(patchpoint_stub).unwrap();
-                    //log::trace!("Writing patch point stub {:#?} @ 0x{:x}", f, entry.vma());
+                    // log::trace!("Writing patch point stub {:#?} @ 0x{:x}", f, entry.vma());
                     f.write(entry.vma().into())
                 }
             }
@@ -345,7 +345,7 @@ fn sync_mutations(agent: &mut Agent, _msg: &SyncMutations) {
 /// Performe an actual execution of the source.
 fn run(agent: &mut Agent, _msg: &RunMessage) -> ProcessType {
     let mut terminated_msg = TerminatedMessage::new();
-    TRACE_MAP.lock().unwrap().as_mut().map(|m| m.finalize());
+    // TRACE_MAP.lock().unwrap().as_mut().map(|m| m.finalize());
 
     let mut child_status: i32 = 0;
     match unsafe { libc::fork() } {

@@ -19,11 +19,12 @@ pub const MUTATION_CACHE_DEFAULT_SIZE: usize = n_mib_bytes!(64) as usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum MutationCacheEntryFlags {
-    None = 0,
+    Empty = 0,
     /// Count the number of executions of this patch point and report it
     /// to the coordinator on termination.
-    TracingEnabled = 1 << 0,
-    Disable = 1 << 1,
+    Tracing = 1,
+    Mutation = 2,
+    Debug = 4
 }
 
 #[derive(Error, Debug)]
@@ -525,12 +526,12 @@ impl MutationCache {
 
     /// Enable tracing for all mutation entries in this set.
     pub fn enable_tracing(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::TracingEnabled)
+        self.set_flag(MutationCacheEntryFlags::Tracing)
     }
 
     /// Disable tracing for all mutation entries in this set.
     pub fn disable_tracing(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::TracingEnabled)
+        self.unset_flag(MutationCacheEntryFlags::Tracing)
     }
 
     /// Remove all mutation entries that have the passed LocationType.

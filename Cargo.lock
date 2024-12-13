@@ -1432,8 +1432,10 @@ version = "0.1.0"
 dependencies = [
  "ansi_term",
  "anyhow",
+ "bincode",
  "byte-unit",
  "chrono",
+ "elf",
  "fern",
  "ipmpsc",
  "lazy_static",
@@ -1447,6 +1449,7 @@ dependencies = [
  "nix 0.26.4",
  "num_enum",
  "posixmq",
+ "proc-maps",
  "rand 0.8.5",
  "serde",
  "serde_json",

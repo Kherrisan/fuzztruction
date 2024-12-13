@@ -281,6 +281,7 @@ mod test {
             crate::dwarf::DwarfReg::Rax,
             0,
             0,
+            0,
         )
     }
 

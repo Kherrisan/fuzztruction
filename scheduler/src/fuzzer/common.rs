@@ -10,7 +10,7 @@ use std::{
 use crate::{
     config::Config,
     mutation_cache_ops::MutationCacheOpsEx,
-    sink::{self, AflSink},
+    sink::{self, Sink},
     sink_bitmap::Bitmap,
     source::{self, Source},
     trace::Trace,
@@ -91,7 +91,7 @@ pub enum ExecError {
 pub fn common_calibrate(
     config: &Config,
     source: &mut Source,
-    sink: &mut AflSink,
+    sink: &mut Sink,
     input: &InputType,
     mut virgin_map: Option<&mut Bitmap>,
     finder: Option<WorkerUid>,
@@ -198,7 +198,7 @@ pub fn common_calibrate(
 pub fn common_calibration_run(
     _config: &Config,
     source: &mut Source,
-    sink: &mut AflSink,
+    sink: &mut Sink,
     data: &[u8],
     timeout: Duration,
     sink_input: &mut Vec<u8>,
@@ -227,7 +227,7 @@ lazy_static! {
 pub fn common_run(
     _config: &Config,
     source: &mut Source,
-    sink: &mut AflSink,
+    sink: &mut Sink,
     source_input_bytes: &[u8],
     timeout: Duration,
     scratch_buffer: &mut Vec<u8>,

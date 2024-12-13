@@ -10,7 +10,7 @@ use crate::{
         worker::FuzzingWorker,
         worker_impl::Cerebrum,
     },
-    sink::AflSink,
+    sink::Sink,
     sink_bitmap::Bitmap,
     source::Source,
 };
@@ -34,7 +34,7 @@ impl FuzzingWorker {
         fs::create_dir_all(&self.interesting_inputs).unwrap();
 
         self.source = Some(Source::from_config(&self.config, Some(self.uid.0))?);
-        self.sink = Some(AflSink::from_config(&self.config, Some(self.uid.0))?);
+        self.sink = Some(Sink::from_config(&self.config, Some(self.uid.0))?);
 
         self.source.as_mut().unwrap().start()?;
         self.sink.as_mut().unwrap().start()?;

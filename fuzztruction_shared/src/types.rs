@@ -17,7 +17,6 @@ lazy_static! {
 impl PatchPointID {
     // Record a reverse index map: (vma, inode, offset) -> PatchPointID
     pub fn get(
-        _id: u32,
         base_offset: usize,
         inode: usize,
         section_file_offset: usize,

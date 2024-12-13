@@ -11,18 +11,24 @@ use fuzztruction_shared::util::current_log_level;
 use fuzztruction_shared::util::try_get_child_exit_reason;
 use libafl::executors::ExitKind;
 use log::error;
+use pingu_generator::agent::HANDSHAKE_TIMEOUT;
+use pingu_generator::messages::HelloMessage;
 use posixmq::PosixMq;
+use proc_maps::MapRange;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 
 use std::env;
 use std::env::set_current_dir;
 use std::os::unix::prelude::AsRawFd;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 use std::{
     convert::TryFrom,
     ffi::CString,
@@ -108,10 +114,10 @@ impl Into<ExitKind> for RunResult {
     }
 }
 
-unsafe impl Send for AflSink {}
+unsafe impl Send for Sink {}
 
 #[derive(Debug)]
-pub struct AflSink {
+pub struct Sink {
     /// That file system path to the target binary.
     path: PathBuf,
     /// The arguments passed to the binary.
@@ -128,10 +134,10 @@ pub struct AflSink {
     forkserver_pid: Option<i32>,
     /// The bitmap used to compute coverage.
     afl_map_shm: Option<MmapShMem>,
-    /// The fd used to send data to the forkserver.
-    send_fd: Option<i32>,
-    /// Non blocking fd used to receive data from the forkserver.
-    receive_fd: Option<i32>,
+    // /// The fd used to send data to the forkserver.
+    // send_fd: Option<i32>,
+    // /// Non blocking fd used to receive data from the forkserver.
+    // receive_fd: Option<i32>,
     // The mq used to receive message from the sink forkserver agent.
     mq_recv: Option<PosixMq>,
     mq_send: Option<PosixMq>,
@@ -143,17 +149,22 @@ pub struct AflSink {
     stderr_file: Option<(File, PathBuf)>,
     // The pid of the sink forked child process.
     pub child_pid: Option<i32>,
+    mem_file: Option<File>,
+    /// The memory mappings of the target application.
+    /// Available after calling `.start()`.
+    mappings: Option<Vec<MapRange>>,
     stop_signal: Arc<RwLock<bool>>,
     /// Whether to log the output written to stdout. If false, the output is discarded.
     log_stdout: bool,
     /// Whether to log the output written to stderr. If false, the output is discarded.
     log_stderr: bool,
+    pub aux_stream_assembler: AuxStreamAssembler,
     config: Option<Config>,
     bitmap_was_resize: bool,
     workdir_file_whitelist: Vec<PathBuf>,
 }
 
-impl AflSink {
+impl Sink {
     pub fn new(
         path: PathBuf,
         mut args: Vec<String>,
@@ -162,7 +173,7 @@ impl AflSink {
         config: Option<&Config>,
         log_stdout: bool,
         log_stderr: bool,
-    ) -> Result<AflSink> {
+    ) -> Result<Sink> {
         let mut workdir_file_whitelist = vec![];
 
         workdir.push("sink");
@@ -241,7 +252,7 @@ impl AflSink {
             stderr_file = Some((file, path));
         }
 
-        Ok(AflSink {
+        Ok(Sink {
             path,
             args,
             workdir,
@@ -250,8 +261,6 @@ impl AflSink {
             input_file: (input_file, input_file_path),
             forkserver_pid: None,
             afl_map_shm: None,
-            send_fd: None,
-            receive_fd: None,
             mq_recv: None,
             mq_send: None,
             mq_recv_name,
@@ -262,21 +271,22 @@ impl AflSink {
             stop_signal: Arc::new(RwLock::new(false)),
             stdout_file,
             stderr_file,
+            aux_stream_assembler: AuxStreamAssembler::new(),
             config: config.cloned(),
             bitmap_was_resize: false,
             workdir_file_whitelist,
+            mem_file: None,
+            mappings: None,
         })
     }
 
-    pub fn build(config: &Config, id: Option<usize>) -> Result<AflSink> {
-        let mut sink = AflSink::from_config(config, id)?;
-
-        sink.afl_map_shm = None;
+    pub fn build(config: &Config, id: Option<usize>) -> Result<Sink> {
+        let sink = Sink::from_config(config, id)?;
 
         Ok(sink)
     }
 
-    pub fn from_config(config: &Config, id: Option<usize>) -> Result<AflSink> {
+    pub fn from_config(config: &Config, id: Option<usize>) -> Result<Sink> {
         let config_new = config.clone();
         let mut workdir = config_new.general.work_dir.clone();
         workdir.push(
@@ -284,7 +294,7 @@ impl AflSink {
                 .unwrap_or_else(|| "0".to_owned()),
         );
 
-        let sink = AflSink::new(
+        let sink = Sink::new(
             config_new.sink.bin_path,
             config_new.sink.arguments,
             workdir,
@@ -296,6 +306,34 @@ impl AflSink {
         Ok(sink)
     }
 
+    pub fn check_link_time_deps(path: &Path, config: Option<&Config>) -> Result<()> {
+        // Check if path points to an executable and whether it is linked against our runtime agent.
+        // FIXME: Handle static binaries?
+        let mut cmd = Command::new("ldd");
+        cmd.args([&path]);
+
+        if let Some(config) = config {
+            // Apply environment variables such as LD_LIBRARY_PATH
+            for (key, val) in &config.source.env {
+                cmd.env(key, val);
+            }
+        }
+
+        let output = cmd
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to call ldd on {:#?}", path))
+            .stdout;
+        let output = String::from_utf8(output).expect("Failed to convert stdout to UTF8.");
+
+        if output.contains("libpingu_generator.so => not found") {
+            Err(SinkError::FatalError(
+                "Target failed to find some libraries/library!".to_owned(),
+            ))
+            .context(output)?;
+        }
+        Ok(())
+    }
+
     /// Wait for the given duration for the forkserver read fd to become ready.
     /// Returns Ok(true) if data becomes ready during the given `timeout`, else
     /// Ok(false).
@@ -303,34 +341,91 @@ impl AflSink {
     /// # Error
     ///
     /// Returns an Error if an unexpected error occurs.
-    fn wait_for_data(&self, timeout: Duration) -> Result<()> {
-        let pollfd = filedescriptor::pollfd {
-            fd: self.receive_fd.unwrap(),
-            events: filedescriptor::POLLIN,
-            revents: 0,
-        };
-        let mut pollfds = [pollfd];
+    // fn wait_for_data(&self, timeout: Duration) -> Result<()> {
+    //     let pollfd = filedescriptor::pollfd {
+    //         fd: self.receive_fd.unwrap(),
+    //         events: filedescriptor::POLLIN,
+    //         revents: 0,
+    //     };
+    //     let mut pollfds = [pollfd];
 
-        let nready = filedescriptor::poll(&mut pollfds, Some(timeout));
-        match nready {
-            Ok(1) => Ok(()),
-            Ok(0) => Err(SinkError::CommunicationTimeoutError(format!(
-                "Did not received data after {:?}",
-                timeout
-            ))
-            .into()),
-            Ok(n) => {
-                unreachable!("Unexpected return value: {}", n);
-            }
-            Err(ref err) => {
-                if let filedescriptor::Error::Poll(err) = err {
-                    if err.kind() == io::ErrorKind::Interrupted {
-                        return self.wait_for_data(timeout);
-                    }
-                }
-                Err(SinkError::FatalError(format!("Failed to poll fd: {:#?}", err)).into())
+    //     let nready = filedescriptor::poll(&mut pollfds, Some(timeout));
+    //     match nready {
+    //         Ok(1) => Ok(()),
+    //         Ok(0) => Err(SinkError::CommunicationTimeoutError(format!(
+    //             "Did not received data after {:?}",
+    //             timeout
+    //         ))
+    //         .into()),
+    //         Ok(n) => {
+    //             unreachable!("Unexpected return value: {}", n);
+    //         }
+    //         Err(ref err) => {
+    //             if let filedescriptor::Error::Poll(err) = err {
+    //                 if err.kind() == io::ErrorKind::Interrupted {
+    //                     return self.wait_for_data(timeout);
+    //                 }
+    //             }
+    //             Err(SinkError::FatalError(format!("Failed to poll fd: {:#?}", err)).into())
+    //         }
+    //     }
+    // }
+
+    /// Wait for `timeout` long for a message of type T.
+    /// Messages of different type received in between are ignored.
+    pub fn wait_for_message<T: Message>(&mut self, timeout: Duration) -> Result<T> {
+        let mq_recv = self.mq_recv.as_ref().unwrap();
+        let mut buf: Vec<u8> = vec![0; mq_recv.attributes().max_msg_len];
+
+        log::trace!("Waiting for message of type {:?}", T::message_type());
+
+        let start_ts = Instant::now();
+        let mut timeout_left = timeout;
+        loop {
+            self.receive_message(timeout_left, &mut buf)
+                .context(format!(
+                    "Failed to receive message of type {:?}",
+                    T::message_type()
+                ))
+                .context(format!(
+                    "Error while waiting for message {:?}",
+                    T::message_type()
+                ))?;
+            timeout_left = timeout.saturating_sub(start_ts.elapsed());
+
+            let header = MsgHeader::try_from_bytes(&buf)?;
+            if header.id == T::message_type() {
+                let ret = T::try_from_bytes(&buf)?;
+                return Ok(ret);
+            } else {
+                log::warn!(
+                    "Skipping message of type {:?} while waiting for {:?} message.",
+                    header.id,
+                    T::message_type()
+                );
             }
         }
+    }
+
+    /// Receive a message from the agent. In case it is a AuxStreamMessage message, it is directly processed.
+    /// If not, the function returns and places the received message into `receive_buf`.
+    pub fn receive_message(&mut self, timeout: Duration, receive_buf: &mut [u8]) -> Result<()> {
+        loop {
+            self.mq_recv
+                .as_ref()
+                .unwrap()
+                .receive_timeout(receive_buf, timeout)?;
+            let header = MsgHeader::try_from_bytes(receive_buf)?;
+            if header.id == MessageType::AuxStreamMessage {
+                Source::process_aux_message(
+                    &mut self.aux_stream_assembler,
+                    AuxStreamMessage::try_from_bytes(receive_buf)?,
+                );
+                continue;
+            }
+            break;
+        }
+        Ok(())
     }
 
     #[allow(unreachable_code)]
@@ -352,25 +447,26 @@ impl AflSink {
             .context("Failed to create sink send MQ")?;
         self.mq_send = Some(mq);
 
-        // send_pipe[1](we) -> send_pipe[0](forkserver).
-        let send_pipe = [0i32; 2];
-        // receive_pipe[1](forkserver) -> receive_pipe[0](we).
-        let receive_pipe = [0i32; 2];
+        // // send_pipe[1](we) -> send_pipe[0](forkserver).
+        // let send_pipe = [0i32; 2];
+        // // receive_pipe[1](forkserver) -> receive_pipe[0](we).
+        // let receive_pipe = [0i32; 2];
 
-        // Create pipe for communicating with the forkserver.
-        unsafe {
-            let ret = libc::pipe(send_pipe.as_ptr() as *mut i32);
-            assert_eq!(ret, 0);
-            let ret = libc::pipe(receive_pipe.as_ptr() as *mut i32);
-            assert_eq!(ret, 0);
-        }
+        // // Create pipe for communicating with the forkserver.
+        // unsafe {
+        //     let ret = libc::pipe(send_pipe.as_ptr() as *mut i32);
+        //     assert_eq!(ret, 0);
+        //     let ret = libc::pipe(receive_pipe.as_ptr() as *mut i32);
+        //     assert_eq!(ret, 0);
+        // }
 
-        self.send_fd = Some(send_pipe[1]);
-        let child_receive_fd = send_pipe[0];
+        // self.send_fd = Some(send_pipe[1]);
+        // let child_receive_fd = send_pipe[0];
 
-        self.receive_fd = Some(receive_pipe[0]);
-        let child_send_fd = receive_pipe[1];
+        // self.receive_fd = Some(receive_pipe[0]);
+        // let child_send_fd = receive_pipe[1];
 
+        log::debug!("Forking sink child");
         let forkserver_pid = unsafe { libc::fork() };
         match forkserver_pid {
             -1 => return Err(anyhow!("Fork failed!")),
@@ -439,6 +535,12 @@ impl AflSink {
                     envp.push(e.to_owned());
                 });
 
+                // Resolve symbols at the start, thus we do not have to do it
+                // after each fork.
+                let ld_bind_now = CString::new("LD_BIND_NOW=1".as_bytes())
+                    .expect("Failed to create LD_BIND_NOW string");
+                envp.push(ld_bind_now);
+
                 let dev_null_fd = unsafe {
                     let path = CString::new("/dev/null".as_bytes()).unwrap();
                     libc::open(path.as_ptr(), libc::O_RDONLY)
@@ -447,15 +549,7 @@ impl AflSink {
                     panic!("Failed to open /dev/null");
                 }
 
-                // match self.input_channel {
-                //     InputChannel::Stdin => unsafe {
-                //         libc::dup2(self.input_file.0.as_raw_fd(), libc::STDIN_FILENO);
-                //     },
-                //     _ => unsafe {
-                //         libc::dup2(dev_null_fd, libc::STDIN_FILENO);
-                //     },
-                // }
-
+                log::debug!("Redirecting stdout to {:?}", self.stdout_file);
                 if self.log_stdout {
                     unsafe {
                         let fd = self.stdout_file.as_ref().unwrap().0.as_raw_fd();
@@ -468,6 +562,7 @@ impl AflSink {
                     }
                 }
 
+                log::debug!("Redirecting stderr to {:?}", self.stderr_file);
                 if self.log_stderr {
                     unsafe {
                         let fd = self.stderr_file.as_ref().unwrap().0.as_raw_fd();
@@ -484,26 +579,26 @@ impl AflSink {
                     libc::close(dev_null_fd);
                 }
 
-                unsafe {
-                    // Close the pipe ends used by our parent.
-                    libc::close(self.receive_fd.unwrap());
-                    libc::close(self.send_fd.unwrap());
+                // unsafe {
+                //     // Close the pipe ends used by our parent.
+                //     // libc::close(self.receive_fd.unwrap());
+                //     // libc::close(self.send_fd.unwrap());
 
-                    // Remap fds to the ones used by the forkserver.
-                    // The fds might have by chance the correct value, in this case
-                    // dup2 & close would actually cause us to close the fd we intended to pass.
-                    if child_receive_fd != AFL_READ_FROM_PARENT_FD {
-                        let ret = libc::dup2(child_receive_fd, AFL_READ_FROM_PARENT_FD);
-                        assert!(ret >= 0);
-                        libc::close(child_receive_fd);
-                    }
+                //     // Remap fds to the ones used by the forkserver.
+                //     // The fds might have by chance the correct value, in this case
+                //     // dup2 & close would actually cause us to close the fd we intended to pass.
+                //     if child_receive_fd != AFL_READ_FROM_PARENT_FD {
+                //         let ret = libc::dup2(child_receive_fd, AFL_READ_FROM_PARENT_FD);
+                //         assert!(ret >= 0);
+                //         libc::close(child_receive_fd);
+                //     }
 
-                    if child_send_fd != AFL_WRITE_TO_PARENT_FD {
-                        let ret = libc::dup2(child_send_fd, AFL_WRITE_TO_PARENT_FD);
-                        assert!(ret >= 0);
-                        libc::close(child_send_fd);
-                    }
-                }
+                //     if child_send_fd != AFL_WRITE_TO_PARENT_FD {
+                //         let ret = libc::dup2(child_send_fd, AFL_WRITE_TO_PARENT_FD);
+                //         assert!(ret >= 0);
+                //         libc::close(child_send_fd);
+                //     }
+                // }
 
                 unsafe {
                     if !self.log_stdout && !self.log_stderr {
@@ -515,6 +610,13 @@ impl AflSink {
                         let ret = libc::setrlimit(libc::RLIMIT_FSIZE, &rlim as *const libc::rlimit);
                         assert_eq!(ret, 0);
                     }
+
+                    // Limit maximum virtual memory size.
+                    let mut rlim: libc::rlimit = std::mem::zeroed();
+                    rlim.rlim_cur = n_gib_bytes!(8).try_into().unwrap();
+                    rlim.rlim_max = n_gib_bytes!(8).try_into().unwrap();
+                    let ret = libc::setrlimit(libc::RLIMIT_AS, &rlim as *const libc::rlimit);
+                    assert_eq!(ret, 0);
 
                     // Disable core dumps
                     let limit_val: libc::rlimit = std::mem::zeroed();
@@ -573,6 +675,11 @@ impl AflSink {
             }
             _ => { /* The parent */ }
         }
+
+        // Take the file, thus their fds get dropped.
+        self.stdout_file.take();
+        self.stderr_file.take();
+
         /* The parent */
         log::info!("Forkserver has pid {}", forkserver_pid);
 
@@ -583,45 +690,81 @@ impl AflSink {
         // Dump some info to state dir
         self.dump_state_to_disk(forkserver_pid)?;
 
-        // Close the pipe ends used by the child.
-        unsafe {
-            libc::close(child_receive_fd);
-            libc::close(child_send_fd);
-        }
+        // // Close the pipe ends used by the child.
+        // unsafe {
+        //     libc::close(child_receive_fd);
+        //     libc::close(child_send_fd);
+        // }
 
-        unsafe {
-            libc::fcntl(self.send_fd.unwrap(), libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(self.receive_fd.unwrap(), libc::F_SETFD, libc::FD_CLOEXEC);
-        }
+        // unsafe {
+        //     libc::fcntl(self.send_fd.unwrap(), libc::F_SETFD, libc::FD_CLOEXEC);
+        //     libc::fcntl(self.receive_fd.unwrap(), libc::F_SETFD, libc::FD_CLOEXEC);
+        // }
 
-        // Wait for for hello from the child.
-        self.wait_for_data(AFL_DEFAULT_TIMEOUT)
+        // Wait for the handshake response.
+        log::debug!("Waiting for handshake message.");
+        let msg = self
+            .wait_for_message::<HelloMessage>(HANDSHAKE_TIMEOUT)
             .context("Timeout while waiting for forkserver to come up.")?;
+        log::debug!("Got HelloMessage. Agents TID is {:?}", msg.senders_tid);
 
         // Read the available data.
-        let buffer = [0u8; 4];
-        unsafe {
-            let ret = libc::read(
-                self.receive_fd.unwrap(),
-                buffer.as_ptr() as *mut libc::c_void,
-                4,
-            );
-            if ret != 4 {
-                return Err(anyhow!(format!(
-                    "Failed to do handshake with forkserver. ret={}",
-                    ret
-                )));
-            }
-        }
+        // let buffer = [0u8; 4];
+        // unsafe {
+        //     let ret = libc::read(
+        //         self.receive_fd.unwrap(),
+        //         buffer.as_ptr() as *mut libc::c_void,
+        //         4,
+        //     );
+        //     if ret != 4 {
+        //         return Err(anyhow!(format!(
+        //             "Failed to do handshake with forkserver. ret={}",
+        //             ret
+        //         )));
+        //     }
+        // }
 
-        if self.stdout_file.is_some() {
-            // Take the the stdout file thus its fd gets dropped.
-            self.stdout_file.take();
+        // if self.stdout_file.is_some() {
+        //     // Take the the stdout file thus its fd gets dropped.
+        //     self.stdout_file.take();
+        // }
+        // if self.stderr_file.is_some() {
+        //     // Take the the stderr file thus its fd gets dropped.
+        //     self.stderr_file.take();
+        // }
+
+        self.mem_file = Some(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!("/proc/{}/mem", forkserver_pid))
+                .context("Failed to open /proc/<x>/mem")?,
+        );
+
+        // Get the mapping of the target memory space.
+        // NOTE: This might not include lazily loaded libraries.
+        let mut mappings =
+            get_process_maps(self.forkserver_pid.unwrap()).context("Failed to get process maps")?;
+        for map in mappings.iter_mut() {
+            let pathname = map
+                .pathname
+                .as_ref()
+                .map(|e| self.resolve_path_from_child(&e));
+            map.pathname = pathname.map(|v| v.to_str().unwrap().to_owned());
         }
-        if self.stderr_file.is_some() {
-            // Take the the stderr file thus its fd gets dropped.
-            self.stderr_file.take();
-        }
+        self.mappings = Some(mappings);
+
+        // Save mapping in state_dir for later use.
+        let mut path = self.state_dir.clone();
+        path.push("source_maps");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(format!("{:#?}", &self.mappings).as_bytes())
+            .unwrap();
 
         self.start_message_loop()?;
 
@@ -929,7 +1072,7 @@ impl AflSink {
     }
 }
 
-impl Drop for AflSink {
+impl Drop for Sink {
     fn drop(&mut self) {
         self.stop();
     }

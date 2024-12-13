@@ -30,3 +30,5 @@ pub mod tracing;
 pub mod shared_memory;
 
 pub mod serializer;
+pub mod finite_integer_set;
+pub mod patchpoint;

@@ -12,7 +12,7 @@ use scheduler::mutation_cache_ops::MutationCacheOpsEx;
 
 use scheduler::source::RunResult;
 
-use scheduler::sink::{self, AflSink};
+use scheduler::sink::{self, Sink};
 use scheduler::source::Source;
 
 use llvm_stackmap::StackMap;
@@ -29,7 +29,7 @@ pub fn benchmark_target(
 
     let mut tmp_buffer = Vec::<u8>::new();
     let mut source = Source::from_config(config, None).unwrap();
-    let mut sink = AflSink::from_config(config, None).unwrap();
+    let mut sink = Sink::from_config(config, None).unwrap();
     source.start().expect("Failed to start source");
     sink.start().expect("Failed to start sink");
 

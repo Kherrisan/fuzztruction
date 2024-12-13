@@ -1283,7 +1283,7 @@ impl Source {
     }
 
     /// Process a received AuxStreamMessage.
-    fn process_aux_message(assembler: &mut AuxStreamAssembler, msg: AuxStreamMessage) {
+    pub fn process_aux_message(assembler: &mut AuxStreamAssembler, msg: AuxStreamMessage) {
         let ret = assembler.process_str_msg(msg);
         match ret {
             Ok(Some((ty, s))) => match ty {
@@ -1496,7 +1496,7 @@ impl Source {
 
         // Enable tracing for all entries but do not touch the other flags.
         self.mutation_cache().borrow_mut().iter_mut().for_each(|e| {
-            e.set_flag(MutationCacheEntryFlags::TracingEnabled);
+            e.set_flag(MutationCacheEntryFlags::Tracing);
         });
         self.sync_mutations()
             .context("Failed to sync mce's before tracing")?;
@@ -1507,7 +1507,7 @@ impl Source {
 
         // Clear the tracing flag.
         self.mutation_cache().borrow_mut().iter_mut().for_each(|e| {
-            e.unset_flag(MutationCacheEntryFlags::TracingEnabled);
+            e.unset_flag(MutationCacheEntryFlags::Tracing);
         });
         // Do not sync, since having records without msk and tracing disabled is not
         // allowed!

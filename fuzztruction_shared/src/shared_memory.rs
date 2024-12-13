@@ -40,7 +40,7 @@ impl MmapShMem {
         let fd;
         let mut size = size;
 
-        log::trace!(
+        log::debug!(
             "shm_open(name={:#?}, create={create}, size={size:x} ({size_kb}))",
             path,
             size_kb = size / 1024
@@ -57,7 +57,7 @@ impl MmapShMem {
             fd = libc::shm_open(c_path.as_ptr() as *const i8, flags, 0o777);
             log::trace!("shm {path} fd: {fd}");
             if fd < 0 {
-                let err = format!("Failed to open shm {:#?}", path);
+                let err = format!("Failed to open shm file {:#?}", path);
                 log::error!("{}", err);
                 return Err(anyhow!(err));
             }
@@ -106,6 +106,14 @@ impl MmapShMem {
             self.map_size.to_string(),
         );
 
+        log::debug!(
+            "shm PINGU_SHM_{name}_PATH:{path} PINGU_SHM_{name}_SIZE:{size} fd: {fd}",
+            name = name,
+            path = self.path,
+            size = self.map_size,
+            fd = self.shm_fd
+        );
+
         Ok(())
     }
 
@@ -122,13 +130,14 @@ impl MmapShMem {
             .context(format!("PINGU_SHM_{}_SIZE", name))?;
 
         Ok(MmapShMem::new(
-            path,
+            path.clone(),
             size.parse().context(format!(
                 "Error in parsing PINGU_SHM_{}_SIZE: {}",
                 name, size
             ))?,
             false,
-        )?)
+        )
+        .context(format!("When getting shm {} from path: {}", name, path))?)
     }
 }
 

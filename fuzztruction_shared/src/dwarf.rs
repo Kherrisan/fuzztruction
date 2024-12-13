@@ -207,11 +207,10 @@ impl DwarfReg {
             _ => (), // fallthrough
         }
 
-        assert!(
-            size == 1 || size == 2 || size == 4 || size == 8,
-            "{:?}",
-            self
-        );
+        if size != 1 && size != 2 && size != 4 && size != 8 {
+            return None;
+        }
+
         match self {
             DwarfReg::Rax => {
                 reg0!(size, "a");

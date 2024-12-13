@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use scheduler::sink::AflSink;
+use scheduler::sink::Sink;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -15,7 +15,7 @@ fn main() {
     }
 
     let path = PathBuf::from(args[1].clone());
-    let mut sink = AflSink::new(
+    let mut sink = Sink::new(
         path,
         args[2..].to_vec(),
         PathBuf::from("/tmp"),
