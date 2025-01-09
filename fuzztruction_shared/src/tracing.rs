@@ -63,6 +63,12 @@ impl std::fmt::Debug for TraceVector {
 }
 
 impl TraceVector {
+    pub fn frequent_set(&self, threshold: usize) -> Vec<u32> {
+        let mut trace_cnt = self.hit_counts();
+        trace_cnt.retain(|_, cnt| *cnt as usize > threshold);
+        trace_cnt.keys().cloned().collect::<Vec<_>>()
+    }
+
     pub fn memory_ratio(&self) -> f64 {
         (self.len() * size_of::<TraceEntry>() + size_of::<TraceVectorHeader>()) as f64
             / self.memory_capacity() as f64

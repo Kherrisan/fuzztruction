@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPointIR {
     pub id: u64,
+    pub module_name: String,
     pub file_name: String,
     pub line: u32,
     pub col: u32,
