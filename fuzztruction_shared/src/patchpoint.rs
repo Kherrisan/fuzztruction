@@ -1,12 +1,12 @@
 use anyhow::Result;
-use std::{
-    assert_matches::assert_matches, collections::HashSet, fs::OpenOptions, ops::Range, path::Path,
-    sync::Mutex,
-};
+use std::{assert_matches::assert_matches, fs::OpenOptions, ops::Range, path::Path};
 
 use crate::{
-    constants::PATCH_POINT_SIZE, mutation_cache::MutationCacheEntryFlags,
-    mutation_cache_entry::MutationCacheEntry, types::PatchPointID,
+    constants::PATCH_POINT_SIZE,
+    mutation_cache::MutationCacheEntryFlags,
+    mutation_cache_entry::MutationCacheEntry,
+    types::PatchPointID,
+    var::{VarDeclRefID, VarType},
 };
 use llvm_stackmap::{LLVMInstruction, LiveOut, Location, LocationType, StackMap};
 use proc_maps::MapRange;
@@ -42,6 +42,10 @@ pub struct PatchPoint {
     address: u64,
     /// The IR information of this patch point.
     ir: Option<PatchPointIR>,
+    /// The variable ID of this patch point.
+    var_id: Option<VarDeclRefID>,
+    /// The variable type information of this patch point.
+    var_type: Option<VarType>,
     /// The live value that where recorded by this patch point.
     /// One patchpoint only contains at most one location, as we only insert one
     /// patchpoint intrinsic for one SSA value at a time.
@@ -78,12 +82,30 @@ impl PatchPoint {
             base,
             address,
             ir: None,
+            var_id: None,
+            var_type: None,
             location,
             mapping,
             function_address,
             target_value_size_in_bit,
             live_outs,
         })
+    }
+
+    pub fn var_type(&self) -> &Option<VarType> {
+        &self.var_type
+    }
+
+    pub fn var_type_mut(&mut self) -> &mut Option<VarType> {
+        &mut self.var_type
+    }
+
+    pub fn var_id(&self) -> &Option<VarDeclRefID> {
+        &self.var_id
+    }
+
+    pub fn var_id_mut(&mut self) -> &mut Option<VarDeclRefID> {
+        &mut self.var_id
     }
 
     pub fn ir(&self) -> &Option<PatchPointIR> {
@@ -208,6 +230,10 @@ impl PatchPoint {
                         mapping,
                         record
                     );
+                }
+
+                if record.patch_point_id == 134260 {
+                    println!("adfad");
                 }
 
                 if let Ok(pp) = PatchPoint::new(
