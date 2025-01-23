@@ -1,5 +1,7 @@
 use anyhow::Result;
-use std::{assert_matches::assert_matches, fs::OpenOptions, ops::Range, path::Path};
+use std::{
+    assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, ops::Range, path::Path,
+};
 
 use crate::{
     constants::PATCH_POINT_SIZE,
@@ -282,14 +284,24 @@ impl From<&PatchPoint> for Box<MutationCacheEntry> {
     }
 }
 
-pub fn dump_patchpoints_bin(path: &Path, patch_points: &[PatchPoint]) {
+pub fn dump_patchpoints_bin(path: &Path, patch_points: &HashMap<PatchPointID, PatchPoint>) {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)
         .unwrap();
-    bincode::serialize_into(&mut file, &patch_points).unwrap();
+    // Print first 5 patch points for debugging
+    patch_points.iter().take(5).for_each(|(id, pp)| {
+        log::info!("PatchPoint: id={:?}, pp={:?}", id, pp);
+    });
+
+    // Serialize all patch points
+    let patchpoints = patch_points.values().cloned().collect::<Vec<_>>();
+    bincode::serialize_into(&mut file, &patchpoints).unwrap();
+
+    let metadata = file.metadata().unwrap();
+    log::info!("Dumped {} bytes to {:?}", metadata.len(), path);
 }
 
 pub fn load_patchpoints_bin(path: &Path) -> Vec<PatchPoint> {
