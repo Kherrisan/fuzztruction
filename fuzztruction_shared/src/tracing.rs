@@ -9,7 +9,7 @@ use std::{
     mem::size_of,
 };
 
-use crate::constants::ENV_FT_SET_SHM;
+use crate::{constants::ENV_FT_SET_SHM, var::VarType};
 
 use super::shared_memory::MmapShMem;
 
@@ -269,6 +269,33 @@ pub struct Trace {
     entries: Vec<TraceEntry>,
 }
 
+// 获取 value 的低 bits 位
+// 例如：value = 0x09, bits = 2, 则返回 0x01
+pub fn int_low_bits(value: u64, bits: u16) -> u64 {
+    assert!(bits <= 64);
+    if bits == 64 {
+        return value;
+    }
+    value & ((1 << bits) - 1)
+}
+
+impl TraceEntry {
+    pub fn typed_value(&self, var_type: &VarType) -> u64 {
+        match var_type {
+            VarType::Int { bits } => int_low_bits(self.value, *bits),
+            VarType::Float { bits } => int_low_bits(self.value, *bits),
+            VarType::Bitfield { offset, width } => {
+                let mask = (1 << *width) - 1;
+                let value = self.value >> *offset;
+                value & mask
+            }
+            VarType::Pointer { pointee_type } => self.typed_value(pointee_type),
+            VarType::Array { elem_type, .. } => self.typed_value(elem_type),
+            VarType::Other { .. } => self.value,
+        }
+    }
+}
+
 pub const TRACE_HIT_CNT_THRESHOLD: usize = 1000;
 
 pub fn remove_frequent_trace_entries(entries: &[TraceEntry], threshold: usize) -> Vec<TraceEntry> {
@@ -298,6 +325,8 @@ pub fn remove_frequent_trace_entries(entries: &[TraceEntry], threshold: usize) -
 
 impl Trace {
     pub fn from_entries(entries: &[TraceEntry]) -> Self {
+        // TODO:
+        // remove frequent trace entries
         let entries = remove_frequent_trace_entries(entries, TRACE_HIT_CNT_THRESHOLD);
 
         Self { entries }
