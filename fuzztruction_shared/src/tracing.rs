@@ -9,7 +9,7 @@ use std::{
     mem::size_of,
 };
 
-use crate::{constants::ENV_FT_SET_SHM, var::VarType};
+use crate::{constants::ENV_FT_SET_SHM, types::PatchPointID};
 
 use super::shared_memory::MmapShMem;
 
@@ -143,50 +143,51 @@ impl TraceVector {
         self.entry(self.len() - 1)
     }
 
-    pub fn hit(&mut self, id: u32, value: u64) {
-        if self.len() >= self.capacity() {
+    pub fn hit(&mut self, id: u32, value: &[u8]) {
+        let entry_size = size_of::<TraceEntry>() + value.len();
+        if self.header().offset + entry_size > self.memory_capacity() {
             println!("TraceVector is full of capacity: {}", self.capacity());
             panic!("TraceVector is full of capacity: {}", self.capacity());
         }
 
-        // append a new entry to the end of the vector
-        let idx = self.len();
-        // println!("idx: {}", idx);
-        *self.len_mut() += 1;
-        // println!("len: {}", self.len());
-        let entry = self.entry_mut(idx).unwrap();
-        entry.id = id;
-        entry.value = value;
-        // println!("entry: {:?}", entry);
+        // 写入 entry
+        unsafe {
+            let entry_ptr = self.data_mut_ptr().add(self.header().offset) as *mut TraceEntry;
+            (*entry_ptr).id = id;
+            (*entry_ptr).length = value.len() as u32;
+
+            // 复制 value 数据
+            let value_ptr = entry_ptr.add(1) as *mut u8;
+            std::ptr::copy_nonoverlapping(value.as_ptr(), value_ptr, value.len());
+        }
+
+        // 更新 header
+        self.header_mut().len += 1;
+        self.header_mut().offset += entry_size;
     }
 
     fn entry(&self, idx: usize) -> Option<&TraceEntry> {
         if idx >= self.len() {
             return None;
         }
-        let entry = unsafe {
-            let ptr = self
-                .data_ptr()
-                .offset((idx * size_of::<TraceEntry>()) as isize);
-            &*(ptr as *const TraceEntry)
-        };
-        Some(entry)
+
+        let mut offset = 0;
+        for i in 0..=idx {
+            let entry = unsafe {
+                let ptr = self.data_ptr().add(offset) as *const TraceEntry;
+                &*ptr
+            };
+            if i == idx {
+                return Some(entry);
+            }
+            offset += size_of::<TraceEntry>() + entry.length as usize;
+        }
+        None
     }
 
-    fn entry_mut(&mut self, idx: usize) -> Option<&mut TraceEntry> {
-        if idx >= self.len() {
-            println!("idx >= self.len(): {}", idx);
-            return None;
-        }
-        let entry = unsafe {
-            // println!("data_mut_ptr: {:#x}", self.data_mut_ptr() as usize);
-            let ptr = self
-                .data_mut_ptr()
-                .offset((idx * size_of::<TraceEntry>()) as isize);
-            // println!("ptr: {:#x}", ptr as usize);
-            &mut *(ptr as *mut TraceEntry)
-        };
-        Some(entry)
+    pub fn get_value(&self, idx: usize) -> Option<&[u8]> {
+        let entry = self.entry(idx)?;
+        Some(unsafe { slice::from_raw_parts(entry.value.as_ptr(), entry.length as usize) })
     }
 
     pub fn data_ptr(&self) -> *const u8 {
@@ -199,14 +200,23 @@ impl TraceVector {
 
     pub fn clear(&mut self) {
         self.header_mut().len = 0;
+        self.header_mut().offset = 0;
     }
 
-    pub fn entries_slice(&self) -> &[TraceEntry] {
-        unsafe { slice::from_raw_parts(self.data_ptr() as *const TraceEntry, self.len()) }
-    }
+    pub fn entries_slice(&self) -> Vec<&TraceEntry> {
+        let mut entries = Vec::new();
+        let mut offset = 0;
 
-    pub fn entries_mut(&mut self) -> &mut [TraceEntry] {
-        unsafe { slice::from_raw_parts_mut(self.data_mut_ptr() as *mut TraceEntry, self.len()) }
+        for _ in 0..self.len() {
+            let entry = unsafe {
+                let ptr = self.data_ptr().add(offset) as *const TraceEntry;
+                &*ptr
+            };
+            entries.push(entry);
+            offset += size_of::<TraceEntry>() + entry.length as usize;
+        }
+
+        entries
     }
 
     pub fn len_mut(&mut self) -> &mut usize {
@@ -234,6 +244,7 @@ impl TraceVector {
 struct TraceVectorHeader {
     capacity: usize,
     len: usize,
+    offset: usize,
     data: [TraceEntry; 0],
 }
 
@@ -247,6 +258,7 @@ impl TraceVectorHeader {
             if create {
                 header.capacity = len;
                 header.len = 0;
+                header.offset = 0;
             }
 
             return Ok(header as *mut TraceVectorHeader);
@@ -260,13 +272,20 @@ pub struct TraceEntry {
     /// Some value that is used to map the `TraceEntry` back to another object
     /// after execution (e.g., the VMA).
     pub id: u32,
-
-    pub value: u64,
+    pub length: u32,
+    pub value: [u8; 0],
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct Trace {
-    entries: Vec<TraceEntry>,
+    items: Vec<TraceItem>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+
+pub struct TraceItem {
+    pub id: u32,
+    pub value: Vec<u8>,
 }
 
 // 获取 value 的低 bits 位
@@ -280,25 +299,18 @@ pub fn int_low_bits(value: u64, bits: u16) -> u64 {
 }
 
 impl TraceEntry {
-    pub fn typed_value(&self, var_type: &VarType) -> u64 {
-        match var_type {
-            VarType::Int { bits } => int_low_bits(self.value, *bits),
-            VarType::Float { bits } => int_low_bits(self.value, *bits),
-            VarType::Bitfield { offset, width } => {
-                let mask = (1 << *width) - 1;
-                let value = self.value >> *offset;
-                value & mask
-            }
-            VarType::Pointer { pointee_type } => self.typed_value(pointee_type),
-            VarType::Array { elem_type, .. } => self.typed_value(elem_type),
-            VarType::Other { .. } => self.value,
-        }
+    pub fn raw_value(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.value.as_ptr(), self.length as usize) }
     }
 }
 
 pub const TRACE_HIT_CNT_THRESHOLD: usize = 1000;
 
-pub fn remove_frequent_trace_entries(entries: &[TraceEntry], threshold: usize) -> Vec<TraceEntry> {
+pub fn remove_frequent_trace_entries<'a>(
+    entries: &[&'a TraceEntry],
+    threshold: usize,
+    too_freq_pp_ids: Option<&mut HashSet<PatchPointID>>,
+) -> Vec<&'a TraceEntry> {
     let len = entries.len();
     let mut trace_cnt: HashMap<u32, usize> = HashMap::new();
     for entry in entries {
@@ -308,8 +320,8 @@ pub fn remove_frequent_trace_entries(entries: &[TraceEntry], threshold: usize) -
     trace_cnt.retain(|_, cnt| *cnt <= threshold);
     let tracable_ids = trace_cnt.keys().cloned().collect::<HashSet<_>>();
 
-    let entries: Vec<TraceEntry> = entries
-        .iter()
+    let entries: Vec<&TraceEntry> = entries
+        .into_iter()
         .filter(|entry| tracable_ids.contains(&entry.id))
         .cloned()
         .collect();
@@ -324,24 +336,32 @@ pub fn remove_frequent_trace_entries(entries: &[TraceEntry], threshold: usize) -
 }
 
 impl Trace {
-    pub fn from_entries(entries: &[TraceEntry]) -> Self {
+    pub fn from_entries(entries: &[&TraceEntry]) -> Self {
         // TODO:
         // remove frequent trace entries
-        let entries = remove_frequent_trace_entries(entries, TRACE_HIT_CNT_THRESHOLD);
+        let entries = remove_frequent_trace_entries(entries, TRACE_HIT_CNT_THRESHOLD, None);
 
-        Self { entries }
+        let items: Vec<TraceItem> = entries
+            .iter()
+            .map(|entry| TraceItem {
+                id: entry.id,
+                value: entry.raw_value().to_vec(),
+            })
+            .collect();
+
+        Self { items }
     }
 
-    pub fn entries(&self) -> &Vec<TraceEntry> {
-        &self.entries
+    pub fn items(&self) -> &Vec<TraceItem> {
+        &self.items
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.items.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.items.is_empty()
     }
 }
 

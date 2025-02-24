@@ -1,54 +1,48 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
 
-#[derive(Clone, Hash, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct VarDeclRefID {
-    pub file: String,
-    pub line: u32,
-    pub col: u32,
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+pub enum LRValue {
+    #[default]
+    LValue,
+    RValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+pub struct VarDeclRef {
     pub name: String,
+    #[serde(rename = "type")]
+    pub ty: VarType,
+    pub is_local: bool,
+    pub is_param: bool,
+    pub is_global: bool,
+    pub parent: Box<Option<VarDeclRef>>,
 }
 
-impl VarDeclRefID {
-    pub fn same_line_with(&self, file: &str, line: u32) -> bool {
-        self.file == file && self.line == line
-    }
-
-    pub fn name(&self) -> String {
-        format!("{}({}:{}:{})", self.name, self.file, self.line, self.col)
-    }
-
-    pub fn serialized_name(&self) -> String {
-        format!("{}:{}:{}:{}", self.file, self.line, self.col, self.name)
-    }
-}
-
-impl From<String> for VarDeclRefID {
-    fn from(s: String) -> Self {
-        let mut iter = s.split(':');
-        let file = iter.next().unwrap();
-        let line = iter.next().unwrap();
-        let col = iter.next().unwrap();
-        let name = iter.next().unwrap();
-        VarDeclRefID {
-            file: file.to_string(),
-            line: line.parse().unwrap(),
-            col: col.parse().unwrap(),
-            name: name.to_string(),
+impl VarDeclRef {
+    fn as_string(&self) -> String {
+        if let Some(parent) = self.parent.as_ref() {
+            format!("{}->{}", parent.as_string(), self.name)
+        } else {
+            format!("{}", self.name)
         }
     }
 }
 
-impl Display for VarDeclRefID {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
+impl TryInto<VarType> for VarDeclRef {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> std::result::Result<VarType, Self::Error> {
+        Ok(self.ty)
     }
 }
 
-impl Debug for VarDeclRefID {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
+impl Display for VarDeclRef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.as_string())
     }
 }
 
@@ -76,6 +70,14 @@ pub enum VarType {
     },
 }
 
+impl Default for VarType {
+    fn default() -> Self {
+        VarType::Other {
+            name: "".to_string(),
+        }
+    }
+}
+
 impl VarType {
     pub fn bytes(&self) -> u64 {
         match self {
@@ -96,6 +98,69 @@ impl VarType {
             VarType::Pointer { pointee_type } => pointee_type.tracable(),
             VarType::Array { elem_type, .. } => elem_type.tracable(),
             _ => false,
+        }
+    }
+
+    pub fn interpret(&self, value: &[u8]) -> Result<String> {
+        match self {
+            VarType::Int { bits } => {
+                let val = if *bits <= 8 {
+                    value[0] as u64
+                } else if *bits <= 16 {
+                    u16::from_le_bytes(value[..2].try_into()?) as u64
+                } else if *bits <= 32 {
+                    u32::from_le_bytes(value[..4].try_into()?) as u64
+                } else {
+                    u64::from_le_bytes(value[..8].try_into()?)
+                };
+                Ok(format!("{}", val))
+            }
+            VarType::Float { bits } => {
+                let val: f64 = if *bits <= 32 {
+                    f64::from_le_bytes(value[..4].try_into()?)
+                } else {
+                    f64::from_le_bytes(value[..8].try_into()?)
+                };
+                Ok(format!("{}", val))
+            }
+            VarType::Bitfield { offset, width } => {
+                let total_bits = *width + *offset;
+                let ty_bits = total_bits.next_power_of_two();
+                let mask = ((1 << *width) - 1) << *offset;
+                let val = if ty_bits <= 8 {
+                    (value[0] as u64 & mask) >> *offset
+                } else if ty_bits <= 16 {
+                    ((u16::from_le_bytes(value[..2].try_into()?) as u64 & mask) >> *offset) as u64
+                } else if ty_bits <= 32 {
+                    ((u32::from_le_bytes(value[..4].try_into()?) as u64 & mask) >> *offset) as u64
+                } else {
+                    ((u64::from_le_bytes(value[..8].try_into()?) & mask) >> *offset) as u64
+                };
+                Ok(format!("{}", val))
+            }
+            VarType::Pointer { pointee_type } => {
+                let val = pointee_type.interpret(value)?;
+                Ok(format!("{}", val))
+            }
+            VarType::Array { elem_type, length } => {
+                let elem_size = elem_type.bytes();
+                let mut result = String::new();
+                result.push('[');
+
+                for i in 0..length.unwrap_or(1) {
+                    let start = i * elem_size as usize;
+                    let end = start + elem_size as usize;
+                    if i > 0 {
+                        result.push_str(", ");
+                    }
+                    let elem_val = elem_type.interpret(&value[start..end])?;
+                    result.push_str(&elem_val);
+                }
+
+                result.push(']');
+                Ok(result)
+            }
+            VarType::Other { name } => Ok(format!("{}", name)),
         }
     }
 }

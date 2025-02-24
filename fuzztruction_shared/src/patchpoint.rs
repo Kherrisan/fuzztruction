@@ -8,7 +8,7 @@ use crate::{
     mutation_cache::MutationCacheEntryFlags,
     mutation_cache_entry::MutationCacheEntry,
     types::PatchPointID,
-    var::{VarDeclRefID, VarType},
+    var::{VarDeclRef, VarType},
 };
 use llvm_stackmap::{LLVMInstruction, LiveOut, Location, LocationType, StackMap};
 use proc_maps::MapRange;
@@ -18,14 +18,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPointIR {
     pub id: u64,
-    pub module_name: String,
-    pub file_name: String,
+    pub module: String,
+    pub file: String,
     pub line: u32,
     pub col: u32,
-    pub func_name: String,
+    pub function: String,
     pub ins: LLVMInstruction,
-    pub var_name: String,
+    pub var: VarDeclRef,
+    #[serde(skip)]
     pub is_func_entry: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -44,10 +46,6 @@ pub struct PatchPoint {
     address: u64,
     /// The IR information of this patch point.
     ir: Option<PatchPointIR>,
-    /// The variable ID of this patch point.
-    var_id: Option<VarDeclRefID>,
-    /// The variable type information of this patch point.
-    var_type: Option<VarType>,
     /// The live value that where recorded by this patch point.
     /// One patchpoint only contains at most one location, as we only insert one
     /// patchpoint intrinsic for one SSA value at a time.
@@ -84,8 +82,6 @@ impl PatchPoint {
             base,
             address,
             ir: None,
-            var_id: None,
-            var_type: None,
             location,
             mapping,
             function_address,
@@ -94,20 +90,8 @@ impl PatchPoint {
         })
     }
 
-    pub fn var_type(&self) -> &Option<VarType> {
-        &self.var_type
-    }
-
-    pub fn var_type_mut(&mut self) -> &mut Option<VarType> {
-        &mut self.var_type
-    }
-
-    pub fn var_id(&self) -> &Option<VarDeclRefID> {
-        &self.var_id
-    }
-
-    pub fn var_id_mut(&mut self) -> &mut Option<VarDeclRefID> {
-        &mut self.var_id
+    pub fn var(&self) -> &VarDeclRef {
+        &self.ir.as_ref().unwrap().var
     }
 
     pub fn ir(&self) -> &Option<PatchPointIR> {
