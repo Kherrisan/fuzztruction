@@ -90,8 +90,17 @@ impl PatchPoint {
         })
     }
 
+    pub fn loc_str(&self) -> String {
+        let ir = self.ir.as_ref().unwrap();
+        format!("{}:{}:{}", ir.file, ir.line, ir.col)
+    }
+
     pub fn var(&self) -> &VarDeclRef {
         &self.ir.as_ref().unwrap().var
+    }
+
+    pub fn var_type(&self) -> &VarType {
+        &self.ir.as_ref().unwrap().var.ty
     }
 
     pub fn ir(&self) -> &Option<PatchPointIR> {
@@ -269,6 +278,7 @@ impl From<&PatchPoint> for Box<MutationCacheEntry> {
 }
 
 pub fn dump_patchpoints_bin(path: &Path, patch_points: &HashMap<PatchPointID, PatchPoint>) {
+    log::info!("Dumping patchpoints to {:?}", path);
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -276,22 +286,28 @@ pub fn dump_patchpoints_bin(path: &Path, patch_points: &HashMap<PatchPointID, Pa
         .open(path)
         .unwrap();
     // Print first 5 patch points for debugging
-    patch_points.iter().take(5).for_each(|(id, pp)| {
-        log::info!("PatchPoint: id={:?}, pp={:?}", id, pp);
-    });
+    // patch_points.iter().take(5).for_each(|(id, pp)| {
+    //     log::info!("PatchPoint: id={:?}, pp={:?}", id, pp);
+    // });
 
     // Serialize all patch points
     let patchpoints = patch_points.values().cloned().collect::<Vec<_>>();
-    bincode::serialize_into(&mut file, &patchpoints).unwrap();
+    // serde_json::to_writer(&mut file, &patchpoints).unwrap();
+    rmp_serde::encode::write(&mut file, &patchpoints).unwrap();
 
     let metadata = file.metadata().unwrap();
     log::info!("Dumped {} bytes to {:?}", metadata.len(), path);
 }
 
 pub fn load_patchpoints_bin(path: &Path) -> Vec<PatchPoint> {
+    log::info!("Loading patchpoints from {:?}", path);
     let file = OpenOptions::new()
         .read(true)
         .open(path)
         .expect(format!("Failed to open patchpoints at {path:?}").as_str());
-    bincode::deserialize_from(&file).expect("Failed to deserialize patchpoints")
+    // let patchpoints: Vec<PatchPoint> = serde_json::from_reader(&file).expect("Failed to deserialize patchpoints");
+    let patchpoints: Vec<PatchPoint> =
+        rmp_serde::decode::from_read(&file).expect("Failed to deserialize patchpoints");
+    log::info!("Loaded {} patchpoints", patchpoints.len());
+    patchpoints
 }

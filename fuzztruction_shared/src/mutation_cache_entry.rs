@@ -216,12 +216,12 @@ impl MutationCacheEntry {
         self
     }
 
-    pub fn enable_debug(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::Debug)
+    pub fn enable_tracing_with_val(&mut self) -> &mut Self {
+        self.set_flag(MutationCacheEntryFlags::TracingWithVal)
     }
 
-    pub fn disable_debug(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::Debug)
+    pub fn disable_tracing_with_val(&mut self) -> &mut Self {
+        self.unset_flag(MutationCacheEntryFlags::TracingWithVal)
     }
 
     pub fn enable_tracing(&mut self) -> &mut Self {

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
 pub enum LRValue {
@@ -14,16 +15,15 @@ pub enum LRValue {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
 pub struct VarDeclRef {
     pub name: String,
-    #[serde(rename = "type")]
     pub ty: VarType,
     pub is_local: bool,
     pub is_param: bool,
     pub is_global: bool,
-    pub parent: Box<Option<VarDeclRef>>,
+    pub parent: Option<Box<VarDeclRef>>,
 }
 
 impl VarDeclRef {
-    fn as_string(&self) -> String {
+    pub fn as_string(&self) -> String {
         if let Some(parent) = self.parent.as_ref() {
             format!("{}->{}", parent.as_string(), self.name)
         } else {
@@ -46,28 +46,26 @@ impl Display for VarDeclRef {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, derive_more::Display)]
+#[serde(tag = "kind")]
 pub enum VarType {
-    Bitfield {
-        offset: u16,
-        width: u16,
-    },
-    Int {
-        bits: u16,
-    },
-    Float {
-        bits: u16,
-    },
-    Pointer {
-        pointee_type: Box<VarType>,
-    },
+    #[display("bitfield({:b})", ((1 as u128) << width - 1) << offset)]
+    Bitfield { offset: u16, width: u16 },
+    #[display("u{bits}")]
+    Int { bits: u16 },
+    #[display("f{bits}")]
+    Float { bits: u16 },
+    #[display("{pointee}*")]
+    Pointer { pointee: Box<VarType> },
+    #[display("[{elem_type}; {length:?}]")]
     Array {
         elem_type: Box<VarType>,
         length: Option<usize>,
     },
-    Other {
-        name: String,
-    },
+    #[display("{name}")]
+    Struct { name: String },
+    #[display("{name}")]
+    Other { name: String },
 }
 
 impl Default for VarType {
@@ -78,30 +76,49 @@ impl Default for VarType {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum InterpretError {
+    #[error("Bitfield overflow: offset {0}, width {1}")]
+    BitfieldOverflow(u16, u16),
+
+    #[error("Address poisoned, type: {0}")]
+    AddressPoisoned(VarType),
+}
+
 impl VarType {
     pub fn bytes(&self) -> u64 {
         match self {
             VarType::Int { bits } => (*bits as u64 + 7) / 8,
             VarType::Float { bits } => (*bits as u64 + 7) / 8,
-            VarType::Bitfield { width, .. } => (*width as u64 + 7) / 8,
-            VarType::Pointer { pointee_type } => pointee_type.bytes(),
+            VarType::Bitfield { width, offset } => {
+                (*width + *offset).next_power_of_two() as u64 / 8
+            }
+            VarType::Pointer {
+                pointee: pointee_type,
+            } => pointee_type.bytes(),
             VarType::Array { elem_type, length } => elem_type.bytes() * length.unwrap_or(1) as u64,
             VarType::Other { .. } => 8,
+            VarType::Struct { .. } => 8,
         }
     }
 
-    pub fn tracable(&self) -> bool {
+    pub fn val_tracable(&self) -> bool {
         match self {
             VarType::Int { .. } => true,
             VarType::Float { .. } => true,
             VarType::Bitfield { .. } => true,
-            VarType::Pointer { pointee_type } => pointee_type.tracable(),
-            VarType::Array { elem_type, .. } => elem_type.tracable(),
+            VarType::Pointer {
+                pointee: pointee_type,
+            } => pointee_type.val_tracable(),
+            VarType::Array { elem_type, .. } => elem_type.val_tracable(),
             _ => false,
         }
     }
 
     pub fn interpret(&self, value: &[u8]) -> Result<String> {
+        if value.len() == 0 {
+            return Err(InterpretError::AddressPoisoned(self.clone()).into());
+        }
         match self {
             VarType::Int { bits } => {
                 let val = if *bits <= 8 {
@@ -125,20 +142,25 @@ impl VarType {
             }
             VarType::Bitfield { offset, width } => {
                 let total_bits = *width + *offset;
+                if total_bits > 128 {
+                    return Err(InterpretError::BitfieldOverflow(*width, *offset).into());
+                }
                 let ty_bits = total_bits.next_power_of_two();
-                let mask = ((1 << *width) - 1) << *offset;
+                let mask = (((1 as u128) << *width) - 1) << *offset;
                 let val = if ty_bits <= 8 {
-                    (value[0] as u64 & mask) >> *offset
+                    (value[0] as u128 & mask) >> *offset
                 } else if ty_bits <= 16 {
-                    ((u16::from_le_bytes(value[..2].try_into()?) as u64 & mask) >> *offset) as u64
+                    ((u16::from_le_bytes(value[..2].try_into()?) as u128 & mask) >> *offset) as u128
                 } else if ty_bits <= 32 {
-                    ((u32::from_le_bytes(value[..4].try_into()?) as u64 & mask) >> *offset) as u64
+                    ((u32::from_le_bytes(value[..4].try_into()?) as u128 & mask) >> *offset) as u128
                 } else {
-                    ((u64::from_le_bytes(value[..8].try_into()?) & mask) >> *offset) as u64
+                    ((u64::from_le_bytes(value[..8].try_into()?) as u128 & mask) >> *offset) as u128
                 };
                 Ok(format!("{}", val))
             }
-            VarType::Pointer { pointee_type } => {
+            VarType::Pointer {
+                pointee: pointee_type,
+            } => {
                 let val = pointee_type.interpret(value)?;
                 Ok(format!("{}", val))
             }
@@ -161,6 +183,7 @@ impl VarType {
                 Ok(result)
             }
             VarType::Other { name } => Ok(format!("{}", name)),
+            VarType::Struct { name } => Ok(format!("{}", name)),
         }
     }
 }

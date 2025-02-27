@@ -23,8 +23,8 @@ pub enum MutationCacheEntryFlags {
     /// Count the number of executions of this patch point and report it
     /// to the coordinator on termination.
     Tracing = 1,
-    Mutation = 2,
-    Debug = 4
+    TracingWithVal = 2,
+    Mutation = 4,
 }
 
 #[derive(Error, Debug)]
