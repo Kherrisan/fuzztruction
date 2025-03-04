@@ -30,6 +30,12 @@ pub struct PatchPointIR {
     pub detail: String,
 }
 
+impl PatchPointIR {
+    pub fn var_with_loc(&self) -> String {
+        format!("{}({}:{}:{})", self.var, self.file, self.line, self.col)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPoint {
     /// A unique ID that identifies this PatchPoint independent of the address space
@@ -93,6 +99,11 @@ impl PatchPoint {
     pub fn loc_str(&self) -> String {
         let ir = self.ir.as_ref().unwrap();
         format!("{}:{}:{}", ir.file, ir.line, ir.col)
+    }
+
+    pub fn var_with_loc(&self) -> String {
+        let ir = self.ir.as_ref().unwrap();
+        format!("{}({}:{}:{})", ir.var, ir.file, ir.line, ir.col)
     }
 
     pub fn var(&self) -> &VarDeclRef {
