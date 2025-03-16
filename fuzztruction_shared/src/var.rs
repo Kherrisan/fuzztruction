@@ -47,7 +47,6 @@ impl Display for VarDeclRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, derive_more::Display)]
-#[serde(tag = "kind")]
 pub enum VarType {
     #[display("bitfield({:b})", ((1 as u128) << width - 1) << offset)]
     Bitfield { offset: u16, width: u16 },
@@ -66,6 +65,25 @@ pub enum VarType {
     Struct { name: String },
     #[display("{name}")]
     Other { name: String },
+}
+
+impl VarType {
+    fn compatible(&self, other: &VarType) -> bool {
+        let derefed_self = self.dereference();
+        let derefed_other = other.dereference();
+        if !derefed_self.is_some() || !derefed_other.is_some() {
+            return false;
+        }
+        let derefed_self = derefed_self.unwrap();
+        let derefed_other = derefed_other.unwrap();
+        if derefed_self == derefed_other {
+            return true;
+        }
+        // For example:
+        // *u8, **u8 and *(u8[])
+        
+        return true;
+    }
 }
 
 impl Default for VarType {
@@ -102,16 +120,36 @@ impl VarType {
         }
     }
 
-    pub fn val_tracable(&self) -> bool {
+    pub fn dereference(&self) -> Option<&VarType> {
         match self {
-            VarType::Int { .. } => true,
-            VarType::Float { .. } => true,
-            VarType::Bitfield { .. } => true,
-            VarType::Pointer {
-                pointee: pointee_type,
-            } => pointee_type.val_tracable(),
-            VarType::Array { elem_type, .. } => elem_type.val_tracable(),
-            _ => false,
+            VarType::Pointer { pointee } => Some(pointee),
+            VarType::Array { elem_type, .. } => Some(elem_type),
+            _ => None,
+        }
+    }
+
+    pub fn val_tracable(&self) -> bool {
+        if let Some(derefed_type) = self.dereference() {
+            match derefed_type {
+                VarType::Int { .. } => true,
+                VarType::Float { .. } => true,
+                VarType::Bitfield { .. } => true,
+                VarType::Pointer { pointee } => match pointee.as_ref() {
+                    VarType::Int { .. } => true,
+                    VarType::Float { .. } => true,
+                    VarType::Bitfield { .. } => true,
+                    _ => false,
+                },
+                VarType::Array { elem_type, .. } => match elem_type.as_ref() {
+                    VarType::Int { .. } => true,
+                    VarType::Float { .. } => true,
+                    VarType::Bitfield { .. } => true,
+                    _ => false,
+                },
+                _ => false,
+            }
+        } else {
+            false
         }
     }
 
