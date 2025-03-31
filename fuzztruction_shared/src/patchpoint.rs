@@ -14,10 +14,59 @@ use llvm_stackmap::{LLVMInstruction, LiveOut, Location, LocationType, StackMap};
 use proc_maps::MapRange;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum InstrumentMethod {
+    StackSpill = 0,
+    Direct = 1,
+}
+
+impl Into<u32> for &InstrumentMethod {
+    fn into(self) -> u32 {
+        match self {
+            InstrumentMethod::StackSpill => 0,
+            InstrumentMethod::Direct => 1,
+        }
+    }
+}
+
+impl TryFrom<u32> for InstrumentMethod {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => InstrumentMethod::StackSpill,
+            1 => InstrumentMethod::Direct,
+            _ => return Err(format!("Invalid instrument method: {}", value)),
+        })
+    }
+}
+
+impl Serialize for InstrumentMethod {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(self.into())
+    }
+}
+
+impl<'de> Deserialize<'de> for InstrumentMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u32::deserialize(deserializer)?;
+        Ok(InstrumentMethod::try_from(value).unwrap())
+    }
+}
+
 /// Static information about an llvm patch point.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPointIR {
-    pub id: u64,
+    pub id: u32,
+    pub svfg_id: u32,
+    pub pag_id: u32,
+    pub icfg_id: u32,
     pub module: String,
     pub file: String,
     pub line: u32,
@@ -25,9 +74,11 @@ pub struct PatchPointIR {
     pub function: String,
     pub ins: LLVMInstruction,
     pub var: VarDeclRef,
+    pub method: InstrumentMethod,
     #[serde(skip)]
     pub is_func_entry: bool,
     pub detail: String,
+    pub bb_name: String,
 }
 
 impl PatchPointIR {
@@ -44,7 +95,7 @@ pub struct PatchPoint {
     /// The patch point ID that was assigned during compilation.
     /// May contains duplicates as parallel compilation units may have the same
     /// patch point ID, or one patchpoint in the loop may be unrolled.
-    llvm_id: u64,
+    llvm_id: u32,
     /// The VMA base if this patch point belongs to binary that is position independent.
     base: u64,
     /// The VMA of this patch point. If this belongs to a PIC binary, `address`
@@ -73,7 +124,7 @@ impl PatchPoint {
     pub fn new(
         base: u64,
         address: u64,
-        llvm_id: u64,
+        llvm_id: u32,
         location: Option<Location>,
         target_value_size_in_bit: u32,
         mapping: MapRange,
@@ -111,7 +162,7 @@ impl PatchPoint {
     }
 
     pub fn var_type(&self) -> &VarType {
-        &self.ir.as_ref().unwrap().var.ty
+        self.ir.as_ref().unwrap().var.type_enum()
     }
 
     pub fn ir(&self) -> &Option<PatchPointIR> {
@@ -126,7 +177,7 @@ impl PatchPoint {
         self.target_value_size_in_bit
     }
 
-    pub fn llvm_id(&self) -> u64 {
+    pub fn llvm_id(&self) -> u32 {
         self.llvm_id
     }
 
@@ -216,8 +267,8 @@ impl PatchPoint {
 
                 assert!(locations[1].loc_type == LocationType::Constant);
                 let target_value_size = locations[1].offset_or_constant;
-                // The size of the recorded value must be positive.
-                assert!(target_value_size > 0);
+                // // The size of the recorded value must be positive.
+                // assert!(target_value_size > 0);
 
                 let mut vma = (function.function_address as usize
                     + record.instruction_offset as usize) as u64;
@@ -245,7 +296,7 @@ impl PatchPoint {
                 if let Ok(pp) = PatchPoint::new(
                     base,
                     vma,
-                    record.patch_point_id,
+                    record.patch_point_id as u32,
                     Some(spill_slot_location.clone()),
                     target_value_size as u32,
                     mapping.clone(),

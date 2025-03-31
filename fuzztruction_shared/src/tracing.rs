@@ -175,7 +175,15 @@ impl TraceVector {
         self.entry(self.len() - 1)
     }
 
-    pub fn hit(&mut self, id: u32, value: &[u8]) {
+    pub fn hit_value<T>(&mut self, id: u32, value: T) {
+        let value_bytes = unsafe {
+            std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
+        };
+
+        self.hit_slice(id, value_bytes);
+    }
+
+    pub fn hit_slice(&mut self, id: u32, value: &[u8]) {
         let align = std::mem::align_of::<TraceVectorEntry>();
         let base_ptr = unsafe { self.data_mut_ptr().add(self.header().offset) };
         let alignment_offset = base_ptr.align_offset(align) as usize;
@@ -217,12 +225,12 @@ impl TraceVector {
         self.header_mut().len += 1;
         self.header_mut().offset += total_size;
 
-        println!(
-            "Hit: id: {}, length: {}, offset: {}",
-            id,
-            value.len(),
-            self.header().offset
-        );
+        // println!(
+        //     "Hit: id: {}, length: {}, offset: {}",
+        //     id,
+        //     value.len(),
+        //     self.header().offset
+        // );
     }
 
     fn entry(&self, idx: usize) -> Option<&TraceVectorEntry> {
@@ -370,7 +378,9 @@ impl TraceVectorHeader {
         assert!(memory.size() >= size_of::<TraceVectorEntry>());
 
         unsafe {
-            let header: &mut TraceVectorHeader = memory.as_object_mut();
+            let header: &mut TraceVectorHeader = &mut *memory
+                .as_mut_ptr_of::<TraceVectorHeader>()
+                .expect("Failed to get header pointer");
 
             if create {
                 header.capacity = len;
@@ -514,7 +524,9 @@ impl TraceSetHeader {
         assert!(memory.size() >= Self::required_size(len));
 
         unsafe {
-            let header: &mut TraceSetHeader = memory.as_object_mut();
+            let header: &mut TraceSetHeader = &mut *memory
+                .as_mut_ptr_of::<TraceSetHeader>()
+                .expect("Failed to get header pointer");
 
             if create {
                 header.capacity = len;

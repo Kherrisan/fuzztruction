@@ -15,7 +15,7 @@ pub enum LRValue {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
 pub struct VarDeclRef {
     pub name: String,
-    pub ty: VarType,
+    ty: VarTypeWithTypedef,
     pub is_local: bool,
     pub is_param: bool,
     pub is_global: bool,
@@ -23,6 +23,18 @@ pub struct VarDeclRef {
 }
 
 impl VarDeclRef {
+    pub fn type_tracable(&self) -> bool {
+        self.type_enum().val_tracable()
+    }
+
+    pub fn type_enum(&self) -> &VarType {
+        &self.ty.ty
+    }
+
+    pub fn typedef_name(&self) -> Option<String> {
+        self.ty.typedef_name.clone()
+    }
+
     pub fn as_string(&self) -> String {
         if let Some(parent) = self.parent.as_ref() {
             format!("{}->{}", parent.as_string(), self.name)
@@ -36,7 +48,7 @@ impl TryInto<VarType> for VarDeclRef {
     type Error = anyhow::Error;
 
     fn try_into(self) -> std::result::Result<VarType, Self::Error> {
-        Ok(self.ty)
+        Ok(self.ty.ty)
     }
 }
 
@@ -55,10 +67,10 @@ pub enum VarType {
     #[display("f{bits}")]
     Float { bits: u16 },
     #[display("{pointee}*")]
-    Pointer { pointee: Box<VarType> },
+    Pointer { pointee: Box<VarTypeWithTypedef> },
     #[display("[{elem_type}; {length:?}]")]
     Array {
-        elem_type: Box<VarType>,
+        elem_type: Box<VarTypeWithTypedef>,
         length: Option<usize>,
     },
     #[display("{name}")]
@@ -68,6 +80,17 @@ pub enum VarType {
 }
 
 impl VarType {
+    pub fn dummy_ptr() -> Self {
+        VarType::Pointer {
+            pointee: Box::new(VarTypeWithTypedef {
+                ty: VarType::Other {
+                    name: "".to_string(),
+                },
+                typedef_name: None,
+            }),
+        }
+    }
+
     fn compatible(&self, other: &VarType) -> bool {
         let derefed_self = self.dereference();
         let derefed_other = other.dereference();
@@ -81,7 +104,7 @@ impl VarType {
         }
         // For example:
         // *u8, **u8 and *(u8[])
-        
+
         return true;
     }
 }
@@ -108,19 +131,27 @@ impl VarType {
         match self {
             VarType::Int { bits } => (*bits as u64 + 7) / 8,
             VarType::Float { bits } => (*bits as u64 + 7) / 8,
-            VarType::Bitfield { width, offset } => {
-                (*width + *offset).next_power_of_two() as u64 / 8
-            }
+            VarType::Bitfield { width, offset } => match *width + *offset {
+                1..=8 => 1,
+                9..=16 => 2,
+                17..=32 => 4,
+                33..=64 => 8,
+                _ => {
+                    16
+                }
+            },
             VarType::Pointer {
                 pointee: pointee_type,
-            } => pointee_type.bytes(),
-            VarType::Array { elem_type, length } => elem_type.bytes() * length.unwrap_or(1) as u64,
+            } => pointee_type.ty.bytes(),
+            VarType::Array { elem_type, length } => {
+                elem_type.ty.bytes() * length.unwrap_or(1) as u64
+            }
             VarType::Other { .. } => 8,
             VarType::Struct { .. } => 8,
         }
     }
 
-    pub fn dereference(&self) -> Option<&VarType> {
+    pub fn dereference(&self) -> Option<&VarTypeWithTypedef> {
         match self {
             VarType::Pointer { pointee } => Some(pointee),
             VarType::Array { elem_type, .. } => Some(elem_type),
@@ -130,20 +161,20 @@ impl VarType {
 
     pub fn val_tracable(&self) -> bool {
         if let Some(derefed_type) = self.dereference() {
-            match derefed_type {
+            match &derefed_type.ty {
                 VarType::Int { .. } => true,
                 VarType::Float { .. } => true,
-                VarType::Bitfield { .. } => true,
-                VarType::Pointer { pointee } => match pointee.as_ref() {
+                VarType::Bitfield { .. } => self.bytes() <= 8,
+                VarType::Pointer { pointee } => match pointee.ty {
                     VarType::Int { .. } => true,
                     VarType::Float { .. } => true,
-                    VarType::Bitfield { .. } => true,
+                    VarType::Bitfield { .. } => self.bytes() <= 8,
                     _ => false,
                 },
-                VarType::Array { elem_type, .. } => match elem_type.as_ref() {
+                VarType::Array { elem_type, .. } => match elem_type.ty {
                     VarType::Int { .. } => true,
                     VarType::Float { .. } => true,
-                    VarType::Bitfield { .. } => true,
+                    VarType::Bitfield { .. } => self.bytes() <= 8,
                     _ => false,
                 },
                 _ => false,
@@ -223,5 +254,46 @@ impl VarType {
             VarType::Other { name } => Ok(format!("{}", name)),
             VarType::Struct { name } => Ok(format!("{}", name)),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+pub struct VarTypeWithTypedef {
+    #[serde(flatten)]
+    pub ty: VarType,
+    pub typedef_name: Option<String>,
+}
+
+impl VarTypeWithTypedef {
+    pub fn bytes(&self) -> u64 {
+        self.ty.bytes()
+    }
+
+    pub fn interpret(&self, value: &[u8]) -> Result<String> {
+        self.ty.interpret(value)
+    }
+}
+
+impl From<&VarType> for VarTypeWithTypedef {
+    fn from(ty: &VarType) -> Self {
+        VarTypeWithTypedef {
+            ty: ty.clone(),
+            typedef_name: None,
+        }
+    }
+}
+
+impl From<VarType> for VarTypeWithTypedef {
+    fn from(ty: VarType) -> Self {
+        VarTypeWithTypedef {
+            ty,
+            typedef_name: None,
+        }
+    }
+}
+
+impl Display for VarTypeWithTypedef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.ty)
     }
 }

@@ -1,8 +1,6 @@
 #![allow(clippy::all)]
-#![feature(new_uninit)]
 #![feature(assert_matches)]
 #![feature(slice_as_chunks)]
-#![feature(exclusive_range_pattern)]
 #![feature(linked_list_cursors)]
 #![feature(linked_list_remove)]
 
