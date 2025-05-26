@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     constants::PATCH_POINT_SIZE,
-    mutation_cache::MutationCacheEntryFlags,
-    mutation_cache_entry::MutationCacheEntry,
+    patching_cache::PatchingCacheEntryFlags,
+    patching_cache_entry::PatchingCacheEntry,
     types::PatchPointID,
     var::{VarDeclRef, VarType},
 };
@@ -209,7 +209,7 @@ impl PatchPoint {
         &self.location
     }
 
-    pub fn into_mutation_cache_entry(&self) -> Box<MutationCacheEntry> {
+    pub fn into_mutation_cache_entry(&self) -> Box<PatchingCacheEntry> {
         self.into()
     }
 
@@ -316,7 +316,7 @@ impl PatchPoint {
     }
 }
 
-impl From<&PatchPoint> for Box<MutationCacheEntry> {
+impl From<&PatchPoint> for Box<PatchingCacheEntry> {
     fn from(pp: &PatchPoint) -> Self {
         let (loc_type, loc_size, dwarf_regnum, offset_or_constant) = if let Some(l) = pp.location()
         {
@@ -325,10 +325,10 @@ impl From<&PatchPoint> for Box<MutationCacheEntry> {
             (llvm_stackmap::LocationType::Invalid, 0, 0, 0)
         };
 
-        MutationCacheEntry::new(
+        PatchingCacheEntry::new(
             pp.id(),
             pp.vma(),
-            MutationCacheEntryFlags::Empty as u8,
+            PatchingCacheEntryFlags::Empty as u8,
             loc_type,
             loc_size,
             dwarf_regnum.try_into().unwrap(),
@@ -366,7 +366,11 @@ pub fn load_patchpoints_bin(path: &Path) -> Vec<PatchPoint> {
     let file = OpenOptions::new()
         .read(true)
         .open(path)
-        .expect(format!("Failed to open patchpoints at {path:?}").as_str());
+        .map_err(|e| {
+            log::error!("Failed to open file {:?}: {}", path, e);
+            e
+        })
+        .unwrap();
     // let patchpoints: Vec<PatchPoint> = serde_json::from_reader(&file).expect("Failed to deserialize patchpoints");
     let patchpoints: Vec<PatchPoint> =
         rmp_serde::decode::from_read(&file).expect("Failed to deserialize patchpoints");

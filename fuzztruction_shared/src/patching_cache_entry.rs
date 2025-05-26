@@ -3,7 +3,7 @@ use memoffset::offset_of;
 
 use crate::{
     dwarf::{self, DwarfReg},
-    mutation_cache::MutationCacheEntryFlags,
+    patching_cache::PatchingCacheEntryFlags,
     types::PatchPointID,
     util,
 };
@@ -12,7 +12,34 @@ use std::alloc;
 const MAX_MASK_LEN: usize = 1024 * 1024 * 64;
 
 #[repr(C)]
-pub struct MutationCacheEntryMetadata {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PatchingOperator {
+    Add = 0,
+    Sub = 1,
+    Mul = 2,
+    Div = 3,
+    Mod = 4,
+    Shl = 5,
+    Shr = 6,
+    And = 7,
+    Or = 8,
+    Xor = 9,
+    Not = 10,
+    Neg = 11,
+    Abs = 12,
+    Set = 13,
+    Clear = 14,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PatchingOperation {
+    pub op: PatchingOperator,
+    pub operand: u128
+}
+
+#[repr(C)]
+pub struct PatchingCacheEntryMetadata {
     /// A unique ID used to map mutation entries onto PatchPoint instances.
     /// We need this field, since the `vma` might differ between multiple
     /// fuzzer instances.
@@ -35,7 +62,7 @@ pub struct MutationCacheEntryMetadata {
     msk_len: u32,
 }
 
-impl std::fmt::Debug for MutationCacheEntryMetadata {
+impl std::fmt::Debug for PatchingCacheEntryMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MutationCacheEntryMetadata")
             .field("id", &self.id)
@@ -52,15 +79,15 @@ impl std::fmt::Debug for MutationCacheEntryMetadata {
 }
 
 #[repr(C)]
-pub struct MutationCacheEntry {
-    pub metadata: MutationCacheEntryMetadata,
+pub struct PatchingCacheEntry {
+    pub metadata: PatchingCacheEntryMetadata,
     /// The mask that is applied in chunks of size `loc_size` each time the mutated
     /// location is accessed. If `loc_size` > 0, then the mask is msk_len + loc_size bytes
     /// long, else it is msk_len bytes in size.
     pub msk: [u8; 0],
 }
 
-impl std::fmt::Debug for MutationCacheEntry {
+impl std::fmt::Debug for PatchingCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MutationCacheEntry")
             .field("metadata", &self.metadata)
@@ -68,7 +95,7 @@ impl std::fmt::Debug for MutationCacheEntry {
     }
 }
 
-impl MutationCacheEntry {
+impl PatchingCacheEntry {
     pub fn new(
         id: PatchPointID,
         vma: u64,
@@ -79,14 +106,14 @@ impl MutationCacheEntry {
         offset_or_constant: i32,
         target_value_size_bits: u32,
         msk_len: u32,
-    ) -> Box<MutationCacheEntry> {
+    ) -> Box<PatchingCacheEntry> {
         assert!(msk_len < MAX_MASK_LEN as u32);
 
         // In case loc_size > 0, we pad the msk_len by loc_size bytes to allow
         // read overflows during mask application.
         let mut real_msk_len = msk_len as usize;
 
-        let mut size = std::mem::size_of::<MutationCacheEntry>() + msk_len as usize;
+        let mut size = std::mem::size_of::<PatchingCacheEntry>() + msk_len as usize;
 
         // One element padding in case read_pos overflows msk_len (see jit gen_mutation_gpr).
         if loc_size > 0 {
@@ -94,9 +121,9 @@ impl MutationCacheEntry {
             real_msk_len += loc_size as usize;
         }
 
-        let mut entry = util::alloc_box_aligned_zeroed::<MutationCacheEntry>(size);
+        let mut entry = util::alloc_box_aligned_zeroed::<PatchingCacheEntry>(size);
 
-        entry.metadata = MutationCacheEntryMetadata {
+        entry.metadata = PatchingCacheEntryMetadata {
             id,
             vma,
             flags,
@@ -122,12 +149,12 @@ impl MutationCacheEntry {
     }
 
     pub fn layout() -> alloc::Layout {
-        alloc::Layout::new::<MutationCacheEntry>()
+        alloc::Layout::new::<PatchingCacheEntry>()
     }
 
-    pub fn clone_into_box(self: &MutationCacheEntry) -> Box<MutationCacheEntry> {
+    pub fn clone_into_box(self: &PatchingCacheEntry) -> Box<PatchingCacheEntry> {
         let size = self.size();
-        let mut entry: Box<MutationCacheEntry> = util::alloc_box_aligned_zeroed(size);
+        let mut entry: Box<PatchingCacheEntry> = util::alloc_box_aligned_zeroed(size);
 
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -141,9 +168,9 @@ impl MutationCacheEntry {
     }
 
     pub fn clone_with_new_msk(
-        self: &MutationCacheEntry,
+        self: &PatchingCacheEntry,
         new_msk_len: u32,
-    ) -> Box<MutationCacheEntry> {
+    ) -> Box<PatchingCacheEntry> {
         assert!(
             new_msk_len <= MAX_MASK_LEN as u32 && new_msk_len > 0,
             "new_msk_len={}",
@@ -158,7 +185,7 @@ impl MutationCacheEntry {
         }
 
         // Zeroed memory
-        let mut entry: Box<MutationCacheEntry> = util::alloc_box_aligned_zeroed(new_size);
+        let mut entry: Box<PatchingCacheEntry> = util::alloc_box_aligned_zeroed(new_size);
 
         // Copy the metadata of the old entry into the new one.
 
@@ -184,7 +211,7 @@ impl MutationCacheEntry {
     /// Get the offset off the msk_len field.
     /// We do not want to make the msk_len field public, thus we need this method.
     pub fn offsetof_msk_len() -> usize {
-        offset_of!(MutationCacheEntryMetadata, msk_len)
+        offset_of!(PatchingCacheEntryMetadata, msk_len)
     }
 
     pub fn id(&self) -> PatchPointID {
@@ -212,35 +239,35 @@ impl MutationCacheEntry {
     }
 
     pub fn reset_flags(&mut self) -> &mut Self {
-        self.metadata.flags = MutationCacheEntryFlags::Empty as u8;
+        self.metadata.flags = PatchingCacheEntryFlags::Empty as u8;
         self
     }
 
     pub fn enable_tracing_with_val(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::TracingWithVal)
+        self.set_flag(PatchingCacheEntryFlags::TracingWithVal)
     }
 
     pub fn disable_tracing_with_val(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::TracingWithVal)
+        self.unset_flag(PatchingCacheEntryFlags::TracingWithVal)
     }
 
     pub fn enable_tracing(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::Tracing)
+        self.set_flag(PatchingCacheEntryFlags::Tracing)
     }
 
     pub fn disable_tracing(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::Tracing)
+        self.unset_flag(PatchingCacheEntryFlags::Tracing)
     }
 
     pub fn enable_mutation(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::Mutation)
+        self.unset_flag(PatchingCacheEntryFlags::Mutation)
     }
 
     pub fn disable_mutation(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::Mutation)
+        self.set_flag(PatchingCacheEntryFlags::Mutation)
     }
 
-    pub fn set_flag(&mut self, flag: MutationCacheEntryFlags) -> &mut Self {
+    pub fn set_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
         self.metadata.flags |= flag as u8;
         self
     }
@@ -253,12 +280,12 @@ impl MutationCacheEntry {
         self.metadata.flags = val;
     }
 
-    pub fn unset_flag(&mut self, flag: MutationCacheEntryFlags) -> &mut Self {
+    pub fn unset_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
         self.metadata.flags &= !(flag as u8);
         self
     }
 
-    pub fn is_flag_set(&self, flag: MutationCacheEntryFlags) -> bool {
+    pub fn is_flag_set(&self, flag: PatchingCacheEntryFlags) -> bool {
         (self.metadata.flags & flag as u8) > 0
     }
 
@@ -275,20 +302,20 @@ impl MutationCacheEntry {
     }
 
     fn size_wo_overflow_padding(&self) -> usize {
-        std::mem::size_of::<MutationCacheEntryMetadata>() + self.msk_len() as usize
+        std::mem::size_of::<PatchingCacheEntryMetadata>() + self.msk_len() as usize
     }
 
-    pub fn as_ptr(&self) -> *const MutationCacheEntry {
-        self as *const MutationCacheEntry
+    pub fn as_ptr(&self) -> *const PatchingCacheEntry {
+        self as *const PatchingCacheEntry
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut MutationCacheEntry {
-        self as *mut MutationCacheEntry
+    pub fn as_mut_ptr(&mut self) -> *mut PatchingCacheEntry {
+        self as *mut PatchingCacheEntry
     }
 
     #[allow(invalid_reference_casting)]
-    pub unsafe fn alias_mut(&self) -> &mut MutationCacheEntry {
-        let ptr = self as *const MutationCacheEntry as *mut MutationCacheEntry;
+    pub unsafe fn alias_mut(&self) -> &mut PatchingCacheEntry {
+        let ptr = self as *const PatchingCacheEntry as *mut PatchingCacheEntry;
         &mut *ptr
     }
 

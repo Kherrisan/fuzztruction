@@ -2,7 +2,7 @@ use std::{cmp::min, mem, ptr, slice::from_raw_parts};
 
 use log::warn;
 
-use crate::{mutation_cache_entry::MutationCacheEntry, types::PatchPointID};
+use crate::{patching_cache_entry::PatchingCacheEntry, types::PatchPointID};
 
 const MAX_MUTATION_CACHE_ENTRIES: usize = 200000;
 const PENDING_DELETIONS_LIMIT: usize = 500;
@@ -14,7 +14,7 @@ struct EntryDescriptor {
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct MutationCacheContent {
+pub struct PatchingCacheContent {
     /// Size of the memory region backing this instance (i.e., the memory &self points to).
     total_size: usize,
     /// The current size of payload data buffer starting at `data`.
@@ -27,10 +27,10 @@ pub struct MutationCacheContent {
     /// currently in the cache.
     entry_decriptor_tbl: [Option<EntryDescriptor>; MAX_MUTATION_CACHE_ENTRIES],
     /// A dynamically growing buffer that contains all MutationCacheEntries.
-    data: [MutationCacheEntry; 0],
+    data: [PatchingCacheEntry; 0],
 }
 
-impl MutationCacheContent {
+impl PatchingCacheContent {
     pub fn consolidate_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(&self.total_size.to_le_bytes());
@@ -89,8 +89,8 @@ impl MutationCacheContent {
         }
     }
 
-    fn data(&self) -> &MutationCacheEntry {
-        let addr = &self.data as *const MutationCacheEntry;
+    fn data(&self) -> &PatchingCacheEntry {
+        let addr = &self.data as *const PatchingCacheEntry;
         let data_slice = unsafe { from_raw_parts(addr, 1) };
         &data_slice[0]
     }
@@ -99,16 +99,16 @@ impl MutationCacheContent {
         self.data().as_ptr() as *const T
     }
 
-    unsafe fn entry_ptr(&self, offset: isize) -> *const MutationCacheEntry {
+    unsafe fn entry_ptr(&self, offset: isize) -> *const PatchingCacheEntry {
         let addr = self.data_ptr::<u8>();
         let addr = addr.offset(offset);
-        addr as *const MutationCacheEntry
+        addr as *const PatchingCacheEntry
     }
 
-    unsafe fn entry_ref(&self, offset: isize) -> &MutationCacheEntry {
+    unsafe fn entry_ref(&self, offset: isize) -> &PatchingCacheEntry {
         let addr = self.data_ptr::<u8>();
         let addr = addr.offset(offset);
-        &*(addr as *const MutationCacheEntry)
+        &*(addr as *const PatchingCacheEntry)
     }
 
     /// Initialize the content.
@@ -151,7 +151,7 @@ impl MutationCacheContent {
 
     /// NOTE: The returned referencers are only valid as long as no entries are added
     /// or removed.
-    fn entries_raw(&self) -> Vec<*const MutationCacheEntry> {
+    fn entries_raw(&self) -> Vec<*const PatchingCacheEntry> {
         let mut ret = Vec::new();
         self.entry_decriptor_tbl
             .iter()
@@ -161,7 +161,7 @@ impl MutationCacheContent {
                 let mut addr = self.data().as_ptr() as *const u8;
                 unsafe {
                     addr = addr.offset(e.start_offset as isize);
-                    ret.push(addr as *const MutationCacheEntry);
+                    ret.push(addr as *const PatchingCacheEntry);
                 };
             });
         ret
@@ -169,7 +169,7 @@ impl MutationCacheContent {
 
     /// NOTE: The returned referencers are only valid as long as no entries are added
     /// or removed.
-    pub fn entries(&self) -> Vec<&MutationCacheEntry> {
+    pub fn entries(&self) -> Vec<&PatchingCacheEntry> {
         self.entries_raw()
             .into_iter()
             .map(|e| unsafe { &*e })
@@ -178,14 +178,14 @@ impl MutationCacheContent {
 
     /// NOTE: The returned referencers are only valid as long as no entries are added
     /// or removed.
-    pub fn entries_mut(&mut self) -> Vec<&mut MutationCacheEntry> {
+    pub fn entries_mut(&mut self) -> Vec<&mut PatchingCacheEntry> {
         self.entries_raw()
             .into_iter()
-            .map(|e| unsafe { &mut *(e as *mut MutationCacheEntry) })
+            .map(|e| unsafe { &mut *(e as *mut PatchingCacheEntry) })
             .collect()
     }
 
-    pub fn push(&mut self, entry: &MutationCacheEntry) -> Option<&MutationCacheEntry> {
+    pub fn push(&mut self, entry: &PatchingCacheEntry) -> Option<&PatchingCacheEntry> {
         assert!(self.next_free_slot < self.entry_decriptor_tbl.len());
 
         if entry.size() > self.space_left() {
@@ -214,7 +214,7 @@ impl MutationCacheContent {
 
             self.current_data_size += entry.size();
             unsafe {
-                return Some(&*(dst_addr as *const MutationCacheEntry));
+                return Some(&*(dst_addr as *const PatchingCacheEntry));
             };
         } else {
             warn!("Not enough descriptor entries available");
@@ -271,8 +271,8 @@ mod test {
     use crate::util;
     use std::assert_matches::assert_matches;
 
-    fn dummy_entry(id: u64) -> Box<MutationCacheEntry> {
-        MutationCacheEntry::new(
+    fn dummy_entry(id: u64) -> Box<PatchingCacheEntry> {
+        PatchingCacheEntry::new(
             id.into(),
             0,
             0,
@@ -288,7 +288,7 @@ mod test {
     #[test]
     fn test_push_remove() {
         let size = 1024 * 1024 * 16;
-        let mut content: Box<MutationCacheContent> = util::alloc_box_aligned_zeroed(size);
+        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
         content.init(size);
 
         let init_space_left = content.space_left();
@@ -319,7 +319,7 @@ mod test {
     #[test]
     fn test_max_entries() {
         let size = 1024 * 1024 * 1024;
-        let mut content: Box<MutationCacheContent> = util::alloc_box_aligned_zeroed(size);
+        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
         content.init(size);
 
         for i in 0..MAX_MUTATION_CACHE_ENTRIES {

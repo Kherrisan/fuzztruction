@@ -285,7 +285,11 @@ impl Message for RunMessage {
 #[repr(C)]
 pub struct TerminatedMessage {
     header: MsgHeader,
+    // The exit code of the child process.
+    // Positive values are the exit code of the child process.
+    // Negative values are the signal that killed the child process, -9 for SIGKILL, -15 for SIGTERM, etc.
     pub exit_code: i32,
+    // Whether the child process timed out.
     pub is_timeout: bool,
 }
 impl Default for TerminatedMessage {

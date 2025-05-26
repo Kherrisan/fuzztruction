@@ -1461,8 +1461,6 @@ dependencies = [
  "fern",
  "ipmpsc",
  "lazy_static",
- "libafl",
- "libafl_bolts",
  "libc",
  "llvm_stackmap",
  "log",

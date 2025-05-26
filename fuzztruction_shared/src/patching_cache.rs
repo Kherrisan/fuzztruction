@@ -10,15 +10,15 @@ use std::alloc;
 use thiserror::Error;
 
 use crate::{
-    constants::ENV_SHM_NAME, mutation_cache_content::MutationCacheContent,
-    mutation_cache_entry::MutationCacheEntry, types::PatchPointID, util,
+    constants::ENV_SHM_NAME, patching_cache_content::PatchingCacheContent,
+    patching_cache_entry::PatchingCacheEntry, types::PatchPointID, util,
 };
 
 pub const MUTATION_CACHE_DEFAULT_SIZE: usize = n_mib_bytes!(64) as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
-pub enum MutationCacheEntryFlags {
+pub enum PatchingCacheEntryFlags {
     Empty = 0,
     /// Count the number of executions of this patch point and report it
     /// to the coordinator on termination.
@@ -28,7 +28,7 @@ pub enum MutationCacheEntryFlags {
 }
 
 #[derive(Error, Debug)]
-pub enum MutationCacheError {
+pub enum PatchingCacheError {
     #[error("Shared memory error: {0}")]
     ShareMemoryError(#[from] ShmemError),
     #[error("The cache can not hold anymore elements.")]
@@ -44,7 +44,7 @@ pub enum MutationCacheError {
 pub mod backing_memory {
     use std::ffi::CString;
 
-    use crate::mutation_cache_content::MutationCacheContent;
+    use crate::patching_cache_content::PatchingCacheContent;
 
     #[derive(Debug)]
     pub struct ShmMemory {
@@ -56,7 +56,7 @@ pub mod backing_memory {
 
     #[derive(Debug)]
     pub struct HeapMemory {
-        pub memory: Box<MutationCacheContent>,
+        pub memory: Box<PatchingCacheContent>,
         pub size: usize,
     }
 
@@ -97,7 +97,7 @@ pub mod backing_memory {
 }
 
 #[derive(Debug)]
-struct MutationCacheContentRawPtr(*mut MutationCacheContent);
+struct MutationCacheContentRawPtr(*mut PatchingCacheContent);
 
 unsafe impl Send for MutationCacheContentRawPtr {}
 
@@ -125,12 +125,12 @@ impl MutationCache {
         self.content().total_used_bytes()
     }
 
-    pub fn content(&self) -> &MutationCacheContent {
+    pub fn content(&self) -> &PatchingCacheContent {
         unsafe { &*self.content.0 }
     }
 
-    pub fn content_mut(&mut self) -> &mut MutationCacheContent {
-        unsafe { &mut *(self.content.0 as *mut MutationCacheContent) }
+    pub fn content_mut(&mut self) -> &mut PatchingCacheContent {
+        unsafe { &mut *(self.content.0 as *mut PatchingCacheContent) }
     }
 
     pub fn content_slice(&self) -> &[u8] {
@@ -144,18 +144,18 @@ impl MutationCache {
     /// Get a vector of references to all entries contained in the cache.
     /// NOTE: The returned referencers are only valid as long as no entries are added
     /// or removed.
-    pub fn entries(&self) -> Vec<&MutationCacheEntry> {
+    pub fn entries(&self) -> Vec<&PatchingCacheEntry> {
         self.content().entries()
     }
 
     /// Get a vector of mutable references to all entries contained in the cache.
     /// NOTE: The returned referencers are only valid as long as no entries are added
     /// or removed.
-    pub fn entries_mut(&mut self) -> Vec<&mut MutationCacheEntry> {
+    pub fn entries_mut(&mut self) -> Vec<&mut PatchingCacheEntry> {
         self.content_mut().entries_mut()
     }
 
-    pub fn entries_mut_static(&mut self) -> Vec<&'static mut MutationCacheEntry> {
+    pub fn entries_mut_static(&mut self) -> Vec<&'static mut PatchingCacheEntry> {
         self.content_mut()
             .entries_mut()
             .into_iter()
@@ -163,7 +163,7 @@ impl MutationCache {
             .collect()
     }
 
-    pub fn entries_mut_ptr(&mut self) -> Vec<*mut MutationCacheEntry> {
+    pub fn entries_mut_ptr(&mut self) -> Vec<*mut PatchingCacheEntry> {
         self.entries_mut()
             .into_iter()
             .map(|e| e.as_mut_ptr())
@@ -173,10 +173,10 @@ impl MutationCache {
 
 /// Implementations realted to creation and lifecycle management of a MutationCache.
 impl MutationCache {
-    fn shm_open(name: &str, create: bool) -> Result<MutationCache, MutationCacheError> {
+    fn shm_open(name: &str, create: bool) -> Result<MutationCache, PatchingCacheError> {
         let mut size = MUTATION_CACHE_DEFAULT_SIZE;
 
-        assert!(!create || size >= mem::size_of::<MutationCacheContent>());
+        assert!(!create || size >= mem::size_of::<PatchingCacheContent>());
         let name_c = CString::new(name).unwrap();
         let fd;
 
@@ -200,14 +200,14 @@ impl MutationCache {
             if fd < 0 {
                 let err = format!("Failed to open shm {}", name);
                 error!("{}", err);
-                return Err(MutationCacheError::ShmError(err));
+                return Err(PatchingCacheError::ShmError(err));
             }
 
             if create {
                 trace!("Truncating fd {fd} to {bytes} bytes", fd = fd, bytes = size);
                 let ret = libc::ftruncate(fd, size as i64);
                 if ret != 0 {
-                    return Err(MutationCacheError::ShmError(
+                    return Err(PatchingCacheError::ShmError(
                         "Failed to ftruncate shm".to_owned(),
                     ));
                 }
@@ -215,7 +215,7 @@ impl MutationCache {
                 let mut stat_buffer: libc::stat = std::mem::zeroed();
                 let ret = libc::fstat(fd, &mut stat_buffer);
                 if ret != 0 {
-                    return Err(MutationCacheError::ShmError(
+                    return Err(PatchingCacheError::ShmError(
                         "Failed to get shm size".to_owned(),
                     ));
                 }
@@ -232,17 +232,17 @@ impl MutationCache {
             );
 
             if mapping == libc::MAP_FAILED {
-                return Err(MutationCacheError::ShmError(
+                return Err(PatchingCacheError::ShmError(
                     "Failed to map shm into addresspace".to_owned(),
                 ));
             }
 
             // Check alignment. Implment logging and sanitize messages
-            let l = alloc::Layout::new::<MutationCacheContent>();
+            let l = alloc::Layout::new::<PatchingCacheContent>();
             assert!(mapping as usize % l.align() == 0);
 
-            let ptr = mapping as *mut MutationCacheContent;
-            let mutation_cache_content: &mut MutationCacheContent = ptr.as_mut().unwrap();
+            let ptr = mapping as *mut PatchingCacheContent;
+            let mutation_cache_content: &mut PatchingCacheContent = ptr.as_mut().unwrap();
             if create {
                 mutation_cache_content.init(size);
             }
@@ -273,7 +273,7 @@ impl MutationCache {
     pub fn open_shm_from_env() -> Result<MutationCache> {
         let send_name = env::var(ENV_SHM_NAME);
         match send_name {
-            Err(_) => Err(MutationCacheError::ShmNotFound(format!(
+            Err(_) => Err(PatchingCacheError::ShmNotFound(format!(
                 "Failed to find environment variable {}",
                 ENV_SHM_NAME
             )))?,
@@ -293,13 +293,13 @@ impl MutationCache {
     pub fn new() -> Result<MutationCache> {
         let size = MUTATION_CACHE_DEFAULT_SIZE;
 
-        assert!(size > std::mem::size_of::<MutationCacheContent>());
-        let mut memory = util::alloc_box_aligned_zeroed::<MutationCacheContent>(size);
+        assert!(size > std::mem::size_of::<PatchingCacheContent>());
+        let mut memory = util::alloc_box_aligned_zeroed::<PatchingCacheContent>(size);
         unsafe {
-            std::ptr::write_bytes(memory.as_mut() as *mut MutationCacheContent, 0, 1);
+            std::ptr::write_bytes(memory.as_mut() as *mut PatchingCacheContent, 0, 1);
         }
         let mutation_cache_content =
-            unsafe { &mut *(memory.as_mut() as *mut MutationCacheContent) };
+            unsafe { &mut *(memory.as_mut() as *mut PatchingCacheContent) };
         mutation_cache_content.init(size);
 
         return Ok(MutationCache {
@@ -336,7 +336,7 @@ impl MutationCache {
                 0,
             );
             if ret != self.content.0 as *mut libc::c_void {
-                return Err(MutationCacheError::Other(format!(
+                return Err(PatchingCacheError::Other(format!(
                     "Remapping shm failed (ret={:#?})",
                     ret
                 )))?;
@@ -346,7 +346,7 @@ impl MutationCache {
         // Make sure that the client does not mess with the shm fd.
         let ret = unsafe { libc::close(mem_shm_fd) };
         if ret != 0 {
-            return Err(MutationCacheError::Other(
+            return Err(PatchingCacheError::Other(
                 "Failed to close shm fd".to_owned(),
             ))?;
         }
@@ -361,7 +361,7 @@ impl MutationCache {
         unsafe {
             // Update the size since we might loaded the content from a differently
             // sized cache.
-            (&mut *(ret.content.0 as *mut MutationCacheContent)).update(ret.content_size);
+            (&mut *(ret.content.0 as *mut PatchingCacheContent)).update(ret.content_size);
         }
 
         Ok(ret)
@@ -370,7 +370,7 @@ impl MutationCache {
 
 /// Methods that are working on the actual cache content.
 impl MutationCache {
-    pub fn push(&mut self, entry: &MutationCacheEntry) -> Option<&MutationCacheEntry> {
+    pub fn push(&mut self, entry: &PatchingCacheEntry) -> Option<&PatchingCacheEntry> {
         self.content_mut().push(entry)
     }
 
@@ -416,7 +416,7 @@ impl MutationCache {
     }
 
     pub fn from_iter<'a>(
-        iter: impl Iterator<Item = &'a MutationCacheEntry>,
+        iter: impl Iterator<Item = &'a PatchingCacheEntry>,
     ) -> Result<MutationCache> {
         let mut ret = Self::new()?;
 
@@ -429,7 +429,7 @@ impl MutationCache {
 
     pub fn replace(&mut self, other: &MutationCache) -> Result<()> {
         if self.content_size < other.content_size {
-            Err(MutationCacheError::CacheOverflow)
+            Err(PatchingCacheError::CacheOverflow)
                 .context("Can not replace cache content with content from a larger cache.")?
         }
 
@@ -464,7 +464,7 @@ impl MutationCache {
     /// !!! This will invalidate all references to the contained entries !!!
     pub fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(&MutationCacheEntry) -> bool,
+        F: FnMut(&PatchingCacheEntry) -> bool,
     {
         let mut entries = self.entries();
         entries.retain(|e| f(*e));
@@ -483,11 +483,11 @@ impl MutationCache {
         debug_assert_eq!(self.len(), wl.len());
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &MutationCacheEntry> {
+    pub fn iter(&self) -> impl Iterator<Item = &PatchingCacheEntry> {
         self.entries().into_iter()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut MutationCacheEntry> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PatchingCacheEntry> {
         self.entries_mut().into_iter()
     }
 
@@ -509,7 +509,7 @@ impl MutationCache {
     }
 
     /// Set the passed MutationCacheEntryFlags on all mutation cache entries.
-    pub fn set_flag(&mut self, flag: MutationCacheEntryFlags) -> &mut Self {
+    pub fn set_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
         self.iter_mut().for_each(|e| {
             e.set_flag(flag);
         });
@@ -517,7 +517,7 @@ impl MutationCache {
     }
 
     /// Clear the MutationCacheEntryFlags from all mutation cache entries.
-    pub fn unset_flag(&mut self, flag: MutationCacheEntryFlags) -> &mut Self {
+    pub fn unset_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
         self.iter_mut().for_each(|e| {
             e.unset_flag(flag);
         });
@@ -526,12 +526,12 @@ impl MutationCache {
 
     /// Enable tracing for all mutation entries in this set.
     pub fn enable_tracing(&mut self) -> &mut Self {
-        self.set_flag(MutationCacheEntryFlags::Tracing)
+        self.set_flag(PatchingCacheEntryFlags::Tracing)
     }
 
     /// Disable tracing for all mutation entries in this set.
     pub fn disable_tracing(&mut self) -> &mut Self {
-        self.unset_flag(MutationCacheEntryFlags::Tracing)
+        self.unset_flag(PatchingCacheEntryFlags::Tracing)
     }
 
     /// Remove all mutation entries that have the passed LocationType.
@@ -585,7 +585,7 @@ mod test {
     use libc::c_void;
     use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
-    use crate::mutation_cache_content::MutationCacheContent;
+    use crate::patching_cache_content::PatchingCacheContent;
 
     use super::MUTATION_CACHE_DEFAULT_SIZE;
 
@@ -635,12 +635,12 @@ mod test {
             }
 
             // Check alignment. Implment logging and sanitize messages
-            let l = std::alloc::Layout::new::<MutationCacheContent>();
+            let l = std::alloc::Layout::new::<PatchingCacheContent>();
             assert!(mapping as usize % l.align() == 0);
 
             // let ptr = mapping as *mut MutationCacheContent;
-            let ptr = transmute::<*mut libc::c_void, *mut MutationCacheContent>(mapping);
-            let mutation_cache_content: &mut MutationCacheContent = ptr.as_mut().unwrap();
+            let ptr = transmute::<*mut libc::c_void, *mut PatchingCacheContent>(mapping);
+            let mutation_cache_content: &mut PatchingCacheContent = ptr.as_mut().unwrap();
 
             mutation_cache_content.init(size);
         }
