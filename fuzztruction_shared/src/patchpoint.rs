@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::{
-    assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, ops::Range, path::Path,
+    assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, hash::Hasher, ops::Range, path::Path
 };
 
 use crate::{
@@ -87,7 +87,7 @@ impl PatchPointIR {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchPoint {
     /// A unique ID that identifies this PatchPoint independent of the address space
     /// it belongs to.
@@ -118,6 +118,20 @@ pub struct PatchPoint {
     target_value_size_in_bit: u32,
     /// Liveout registers
     live_outs: Vec<LiveOut>,
+}
+
+impl PartialEq for PatchPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for PatchPoint {}
+
+impl std::hash::Hash for PatchPoint {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
 }
 
 impl PatchPoint {
@@ -207,10 +221,6 @@ impl PatchPoint {
 
     pub fn location(&self) -> &Option<Location> {
         &self.location
-    }
-
-    pub fn into_mutation_cache_entry(&self) -> Box<PatchingCacheEntry> {
-        self.into()
     }
 
     pub fn load(path: &Path) -> Vec<PatchPoint> {
@@ -313,29 +323,6 @@ impl PatchPoint {
         }
 
         patch_points
-    }
-}
-
-impl From<&PatchPoint> for Box<PatchingCacheEntry> {
-    fn from(pp: &PatchPoint) -> Self {
-        let (loc_type, loc_size, dwarf_regnum, offset_or_constant) = if let Some(l) = pp.location()
-        {
-            (l.loc_type, l.loc_size, l.dwarf_regnum, l.offset_or_constant)
-        } else {
-            (llvm_stackmap::LocationType::Invalid, 0, 0, 0)
-        };
-
-        PatchingCacheEntry::new(
-            pp.id(),
-            pp.vma(),
-            PatchingCacheEntryFlags::Empty as u8,
-            loc_type,
-            loc_size,
-            dwarf_regnum.try_into().unwrap(),
-            offset_or_constant,
-            pp.target_value_size_in_bit(),
-            0,
-        )
     }
 }
 

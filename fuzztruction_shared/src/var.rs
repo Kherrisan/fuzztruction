@@ -356,4 +356,18 @@ impl VarType {
             VarType::Struct { name, .. } => Ok(format!("{}", name)),
         }
     }
+
+    pub fn word(&self) -> String {
+        if self.num_bytes() <= 8 {
+            "byte".to_string()
+        } else if self.num_bytes() <= 16 {
+            "word".to_string()
+        } else if self.num_bytes() <= 32 {
+            "dword".to_string()
+        } else if self.num_bytes() <= 64 {
+            "qword".to_string()
+        } else {
+            panic!("Unsupported operand width: {}", self.num_bytes());
+        }
+    }
 }

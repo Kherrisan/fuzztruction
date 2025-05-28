@@ -4,41 +4,40 @@ use memoffset::offset_of;
 use crate::{
     dwarf::{self, DwarfReg},
     patching_cache::PatchingCacheEntryFlags,
+    patchpoint::PatchPoint,
     types::PatchPointID,
     util,
 };
 use std::alloc;
 
-const MAX_MASK_LEN: usize = 1024 * 1024 * 64;
+const MAX_OP_COUNT: usize = 1024 * 1024 * 64;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PatchingOperator {
     Add = 0,
     Sub = 1,
-    Mul = 2,
-    Div = 3,
-    Mod = 4,
-    Shl = 5,
-    Shr = 6,
-    And = 7,
-    Or = 8,
-    Xor = 9,
-    Not = 10,
-    Neg = 11,
-    Abs = 12,
-    Set = 13,
-    Clear = 14,
+    Shl = 2,
+    Shr = 3,
+    And = 4,
+    Or = 5,
+    Xor = 6,
+    Not = 7,
+    Set = 8,
+    Clear = 9,
+    Nop = 10,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PatchingOperation {
     pub op: PatchingOperator,
-    pub operand: u128
+    pub operand: u64,
+    pub next_idx: Option<usize>,
 }
 
 #[repr(C)]
+#[derive(Clone)]
 pub struct PatchingCacheEntryMetadata {
     /// A unique ID used to map mutation entries onto PatchPoint instances.
     /// We need this field, since the `vma` might differ between multiple
@@ -55,11 +54,7 @@ pub struct PatchingCacheEntryMetadata {
 
     pub target_value_size_bits: u32,
 
-    pub read_pos: u32,
-    /// The length of the mask stored at MutationCacheEntry.msk. If `loc_size` is > 0,
-    /// the mask contains `loc_size` additional bytes that can be used in case the
-    /// mutation stub read ptr overflows and reads more then msk_len bytes (see agent.rs).
-    msk_len: u32,
+    pub op_slot: u8,
 }
 
 impl std::fmt::Debug for PatchingCacheEntryMetadata {
@@ -72,25 +67,28 @@ impl std::fmt::Debug for PatchingCacheEntryMetadata {
             .field("loc_size", &self.loc_size)
             .field("dwarf_regnum", &self.dwarf_regnum)
             .field("offset_or_constant", &self.offset_or_constant)
-            .field("read_pos", &self.read_pos)
-            .field("msk_len", &self.msk_len)
+            .field("op_slot", &self.op_slot)
             .finish()
     }
 }
 
 #[repr(C)]
+#[derive(Clone)]
 pub struct PatchingCacheEntry {
     pub metadata: PatchingCacheEntryMetadata,
     /// The mask that is applied in chunks of size `loc_size` each time the mutated
     /// location is accessed. If `loc_size` > 0, then the mask is msk_len + loc_size bytes
     /// long, else it is msk_len bytes in size.
-    pub msk: [u8; 0],
+    pub op_head_idx: Option<usize>,
+    pub op_tail_idx: Option<usize>,
 }
 
 impl std::fmt::Debug for PatchingCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MutationCacheEntry")
+        f.debug_struct("PatchingCacheEntry")
             .field("metadata", &self.metadata)
+            .field("op_head_idx", &self.op_head_idx)
+            .field("op_tail_idx", &self.op_tail_idx)
             .finish()
     }
 }
@@ -105,25 +103,8 @@ impl PatchingCacheEntry {
         dwarf_regnum: dwarf::DwarfReg,
         offset_or_constant: i32,
         target_value_size_bits: u32,
-        msk_len: u32,
-    ) -> Box<PatchingCacheEntry> {
-        assert!(msk_len < MAX_MASK_LEN as u32);
-
-        // In case loc_size > 0, we pad the msk_len by loc_size bytes to allow
-        // read overflows during mask application.
-        let mut real_msk_len = msk_len as usize;
-
-        let mut size = std::mem::size_of::<PatchingCacheEntry>() + msk_len as usize;
-
-        // One element padding in case read_pos overflows msk_len (see jit gen_mutation_gpr).
-        if loc_size > 0 {
-            size += loc_size as usize;
-            real_msk_len += loc_size as usize;
-        }
-
-        let mut entry = util::alloc_box_aligned_zeroed::<PatchingCacheEntry>(size);
-
-        entry.metadata = PatchingCacheEntryMetadata {
+    ) -> PatchingCacheEntry {
+        let metadata = PatchingCacheEntryMetadata {
             id,
             vma,
             flags,
@@ -131,21 +112,15 @@ impl PatchingCacheEntry {
             loc_size,
             dwarf_regnum,
             offset_or_constant,
-            read_pos: 0,
             target_value_size_bits,
-            msk_len,
+            op_slot: 0,
         };
 
-        // Initialize the msk to 0x00
-        unsafe {
-            std::ptr::write_bytes(
-                entry.get_msk_as_ptr::<u8>(),
-                0x00,
-                real_msk_len, // Also zero the padding.
-            );
+        PatchingCacheEntry {
+            metadata,
+            op_head_idx: None,
+            op_tail_idx: None,
         }
-
-        entry
     }
 
     pub fn layout() -> alloc::Layout {
@@ -171,47 +146,46 @@ impl PatchingCacheEntry {
         self: &PatchingCacheEntry,
         new_msk_len: u32,
     ) -> Box<PatchingCacheEntry> {
-        assert!(
-            new_msk_len <= MAX_MASK_LEN as u32 && new_msk_len > 0,
-            "new_msk_len={}",
-            new_msk_len
-        );
+        unimplemented!()
+        // assert!(
+        //     new_msk_len <= MAX_MASK_LEN as u32 && new_msk_len > 0,
+        //     "new_msk_len={}",
+        //     new_msk_len
+        // );
 
-        let mut new_size = std::mem::size_of_val(self) + new_msk_len as usize;
+        // let mut new_size = std::mem::size_of_val(self) + new_msk_len as usize;
 
-        // Padding for read overlow support.
-        if self.loc_size() > 0 {
-            new_size += self.loc_size() as usize;
-        }
+        // // Padding for read overlow support.
+        // if self.loc_size() > 0 {
+        //     new_size += self.loc_size() as usize;
+        // }
 
-        // Zeroed memory
-        let mut entry: Box<PatchingCacheEntry> = util::alloc_box_aligned_zeroed(new_size);
+        // // Zeroed memory
+        // let mut entry: Box<PatchingCacheEntry> = util::alloc_box_aligned_zeroed(new_size);
 
-        // Copy the metadata of the old entry into the new one.
+        // // Copy the metadata of the old entry into the new one.
 
-        let mut bytes_to_copy = self.size_wo_overflow_padding();
-        if self.msk_len() > new_msk_len {
-            // If we are shrinking the msk, do not copy all data from the old entry.
-            bytes_to_copy -= (self.msk_len() - new_msk_len) as usize;
-        }
+        // let mut bytes_to_copy = self.size_wo_overflow_padding();
+        // if self.msk_len() > new_msk_len {
+        //     // If we are shrinking the msk, do not copy all data from the old entry.
+        //     bytes_to_copy -= (self.msk_len() - new_msk_len) as usize;
+        // }
 
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.as_ptr() as *const u8,
-                entry.as_mut_ptr() as *mut u8,
-                bytes_to_copy,
-            );
-        }
+        // unsafe {
+        //     std::ptr::copy_nonoverlapping(
+        //         self.as_ptr() as *const u8,
+        //         entry.as_mut_ptr() as *mut u8,
+        //         bytes_to_copy,
+        //     );
+        // }
 
-        // Adapt metadata to changed values.
-        entry.metadata.msk_len = new_msk_len;
-        entry
+        // // Adapt metadata to changed values.
+        // entry.metadata.msk_len = new_msk_len;
+        // entry
     }
 
-    /// Get the offset off the msk_len field.
-    /// We do not want to make the msk_len field public, thus we need this method.
-    pub fn offsetof_msk_len() -> usize {
-        offset_of!(PatchingCacheEntryMetadata, msk_len)
+    pub fn offsetof_op_slot() -> usize {
+        offset_of!(PatchingCacheEntryMetadata, op_slot)
     }
 
     pub fn id(&self) -> PatchPointID {
@@ -234,8 +208,8 @@ impl PatchingCacheEntry {
         self.metadata.dwarf_regnum
     }
 
-    pub fn msk_len(&self) -> u32 {
-        self.metadata.msk_len
+    pub fn op_slot(&self) -> u8 {
+        self.metadata.op_slot
     }
 
     pub fn reset_flags(&mut self) -> &mut Self {
@@ -260,11 +234,11 @@ impl PatchingCacheEntry {
     }
 
     pub fn enable_mutation(&mut self) -> &mut Self {
-        self.unset_flag(PatchingCacheEntryFlags::Mutation)
+        self.unset_flag(PatchingCacheEntryFlags::Patching)
     }
 
     pub fn disable_mutation(&mut self) -> &mut Self {
-        self.set_flag(PatchingCacheEntryFlags::Mutation)
+        self.set_flag(PatchingCacheEntryFlags::Patching)
     }
 
     pub fn set_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
@@ -292,17 +266,7 @@ impl PatchingCacheEntry {
     /// The size in bytes of the whole entry. Cloning a MutationCacheEntry requires
     /// to copy .size() bytes from a pointer of type MutationCacheEntry.
     pub fn size(&self) -> usize {
-        let mut ret = self.size_wo_overflow_padding();
-        if self.msk_len() > 0 {
-            // The msk is padded with an additional element which is used in case
-            // read_pos overflows.
-            ret += self.loc_size() as usize;
-        }
-        ret
-    }
-
-    fn size_wo_overflow_padding(&self) -> usize {
-        std::mem::size_of::<PatchingCacheEntryMetadata>() + self.msk_len() as usize
+        std::mem::size_of::<PatchingCacheEntryMetadata>()
     }
 
     pub fn as_ptr(&self) -> *const PatchingCacheEntry {
@@ -319,21 +283,23 @@ impl PatchingCacheEntry {
         &mut *ptr
     }
 
-    pub fn get_msk_as_ptr<T>(&self) -> *mut T {
-        self.msk.as_ptr() as *mut T
-    }
-
-    pub fn get_msk_as_slice(&self) -> &mut [u8] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.get_msk_as_ptr(), self.metadata.msk_len as usize)
-        }
-    }
-
     pub fn is_nop(&self) -> bool {
-        let msk = self.get_msk_as_slice();
-        if msk.is_empty() {
-            return true;
-        }
-        msk.iter().all(|v| *v == 0)
+        self.op_head_idx.is_none()
+    }
+}
+
+impl From<&PatchPoint> for PatchingCacheEntry {
+    fn from(pp: &PatchPoint) -> Self {
+        let loc = pp.location().as_ref().unwrap();
+        PatchingCacheEntry::new(
+            pp.id(),
+            pp.vma(),
+            0,
+            loc.loc_type,
+            loc.loc_size,
+            DwarfReg::try_from(loc.dwarf_regnum).unwrap(),
+            loc.offset_or_constant,
+            pp.target_value_size_in_bit(),
+        )
     }
 }
