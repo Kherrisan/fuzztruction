@@ -1,35 +1,57 @@
-use std::{
-    cmp::min,
-    mem,
-    ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut},
-    slice::from_raw_parts,
-};
-
-use log::warn;
+use std::{fmt::Debug, mem};
 
 use crate::{
+    patching_cache::PatchingCache,
     patching_cache_entry::{PatchingCacheEntry, PatchingOperation},
     types::PatchPointID,
 };
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
-const PATCHING_CACHE_ENTRY_BM_CAP: usize = 100000;
-const PATCHING_OP_BM_CAP: usize = 10000;
-const PENDING_DELETIONS_LIMIT: usize = 500;
-
-#[derive(Debug, Clone)]
+#[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq, Default)]
 pub struct PatchingCacheContentPackage {
     entry_size: usize,
 
     op_size: usize,
 
-    entries: Vec<PatchingCacheEntry>,
+    pub entries: Vec<PatchingCacheEntry>,
 
     ops: Vec<(usize, PatchingOperation)>,
 }
 
-struct BitmapIter {
+impl From<&PatchingCache> for PatchingCacheContentPackage {
+    fn from(pc: &PatchingCache) -> Self {
+        pc.content().consolidate_package()
+    }
+}
+
+impl From<PatchingCache> for PatchingCacheContentPackage {
+    fn from(pc: PatchingCache) -> Self {
+        pc.content().consolidate_package()
+    }
+}
+
+impl Into<PatchingCache> for &PatchingCacheContentPackage {
+    fn into(self) -> PatchingCache {
+        let mut pc = PatchingCache::new(self.entry_size, self.op_size).unwrap();
+        pc.load_package(&self).unwrap();
+        pc
+    }
+}
+
+impl std::fmt::Debug for PatchingCacheContentPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PatchingCacheContentPackage {{")?;
+        write!(
+            f,
+            " entry_size: {}, op_size: {}",
+            self.entry_size, self.op_size
+        )?;
+        write!(f, " }}")
+    }
+}
+pub struct BitmapIter {
     bitmap_ptr: *const Bitmap,
     current_index: usize,
 }
@@ -56,7 +78,7 @@ impl Iterator for BitmapIter {
 struct Bitmap {
     size: usize,
     next_free_idx: usize,
-    bitmap_ptr: *mut u8,
+    bitmap_offset: isize,
     bitmap_len: usize,
 }
 
@@ -68,21 +90,29 @@ impl Bitmap {
         }
     }
 
-    fn new(ptr: *mut u8, len: usize) -> Self {
-        Self {
-            size: 0,
-            next_free_idx: 0,
-            bitmap_ptr: ptr,
-            bitmap_len: len,
+    fn init(&mut self, ptr: *mut u8, len: usize, create: bool) {
+        let self_addr = self as *const Bitmap as *const u8;
+        self.bitmap_offset = unsafe { ptr.offset_from(self_addr) };
+        self.bitmap_len = len;
+
+        if create {
+            self.size = 0;
+            self.next_free_idx = 0;
+            self.clear();
         }
     }
 
+    fn bitmap_ptr(&self) -> *mut u8 {
+        let self_addr = self as *const Bitmap as *const u8;
+        unsafe { self_addr.offset(self.bitmap_offset) as *mut u8 }
+    }
+
     fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.bitmap_ptr, self.bitmap_len) }
+        unsafe { std::slice::from_raw_parts(self.bitmap_ptr(), self.bitmap_len) }
     }
 
     fn as_slice_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.bitmap_ptr, self.bitmap_len) }
+        unsafe { std::slice::from_raw_parts_mut(self.bitmap_ptr(), self.bitmap_len) }
     }
 
     fn is_set(&self, idx: usize) -> Result<bool> {
@@ -135,6 +165,9 @@ impl Bitmap {
     }
 
     fn find_n_clear(&mut self, n: usize) -> Result<Vec<usize>> {
+        if n == 0 {
+            return Ok(vec![]);
+        }
         let mut n = n;
         let mut ret = vec![];
         for i in 0..self.capacity() {
@@ -160,8 +193,9 @@ impl Bitmap {
                 return Err(anyhow::anyhow!("No free slot found"));
             }
         }
+        let free_idx = self.next_free_idx;
         self.next_free_idx = (self.next_free_idx + 1) % self.capacity();
-        Ok(self.next_free_idx - 1)
+        Ok(free_idx)
     }
 
     fn capacity(&self) -> usize {
@@ -171,10 +205,24 @@ impl Bitmap {
     fn size(&self) -> usize {
         self.size
     }
+
+    pub fn print(&self, start: usize, length: usize) {
+        let slice = self.as_slice();
+        println!("Bitmap, start: {}, length: {}", start, length);
+        for i in start..start + length {
+            if i % 16 == 0 {
+                print!("0x{:x}: ", (i - start) / 8 + self.bitmap_ptr() as usize);
+            }
+            print!("{:02x} ", slice[i]);
+            if i % 16 == 15 {
+                println!();
+            }
+        }
+        println!();
+    }
 }
 
 #[repr(C)]
-#[derive(Debug)]
 pub struct PatchingCacheContent {
     /// Size of the memory region backing this instance (i.e., the memory &self points to).
     total_size: usize,
@@ -194,8 +242,33 @@ pub struct PatchingCacheContent {
     data: [u8; 0],
 }
 
+impl std::fmt::Debug for PatchingCacheContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PatchingCacheContent {{")?;
+        write!(f, "data address: 0x{:x}, ", self.data.as_ptr() as usize)?;
+        write!(f, "total_size: {}, entry_data_offset: {}, op_data_offset: {}, entry_table_size: {}, op_table_size: {}", self.total_size, self.entry_data_offset, self.op_data_offset, self.entry_table_size, self.op_table_size)?;
+        write!(f, " }}")
+    }
+}
+
 impl PatchingCacheContent {
-    pub fn consolidate(&self) -> PatchingCacheContentPackage {
+    pub fn iter(&self) -> BitmapIter {
+        self.entry_bitmap.iter()
+    }
+
+    pub fn entry_data_offset(&self) -> usize {
+        self.entry_data_offset
+    }
+
+    pub fn op_data_offset(&self) -> usize {
+        self.op_data_offset
+    }
+
+    pub fn data_ptr(&self) -> *const u8 {
+        self.data.as_ptr()
+    }
+
+    pub fn consolidate_package(&self) -> PatchingCacheContentPackage {
         let mut entries = vec![];
         let mut ops = vec![];
 
@@ -215,38 +288,45 @@ impl PatchingCacheContent {
         }
     }
 
-    pub fn load_consolidate_package(&mut self, package: PatchingCacheContentPackage) -> Result<()> {
+    pub fn load_consolidate_package(
+        &mut self,
+        package: &PatchingCacheContentPackage,
+    ) -> Result<()> {
         self.clear();
-        self.init(package.entry_size, package.op_size);
+        self.init(package.entry_size, package.op_size, true);
 
-        for (i, entry) in package.entries.into_iter().enumerate() {
-            *self.entry_mut(i) = entry;
+        for (i, entry) in package.entries.iter().enumerate() {
+            *self.entry_mut(i) = entry.clone();
             self.entry_bitmap.set(i)?;
         }
 
-        for (idx, op) in package.ops.into_iter() {
-            *self.op_mut(idx) = op;
-            self.op_bitmap.set(idx)?;
+        for (idx, op) in package.ops.iter() {
+            *self.op_mut(*idx) = op.clone();
+            self.op_bitmap.set(*idx)?;
         }
 
         Ok(())
     }
 
+    #[inline]
     unsafe fn entry_data_ptr<T>(&self) -> *const T {
         self.data.as_ptr().offset(self.entry_data_offset as isize) as *const T
     }
 
+    #[inline]
     unsafe fn op_data_ptr<T>(&self) -> *const T {
         self.data.as_ptr().offset(self.op_data_offset as isize) as *const T
     }
 
+    #[inline]
     unsafe fn entry_ptr(&self, idx: usize) -> *const PatchingCacheEntry {
         let addr = self.entry_data_ptr::<u8>();
         let addr = addr.offset((idx * mem::size_of::<PatchingCacheEntry>()) as isize);
         addr as *const PatchingCacheEntry
     }
 
-    fn entry_ref(&self, idx: usize) -> &PatchingCacheEntry {
+    #[inline]
+    pub fn entry_ref(&self, idx: usize) -> &PatchingCacheEntry {
         unsafe {
             let addr = self.entry_data_ptr::<u8>();
             let addr = addr.offset((idx * mem::size_of::<PatchingCacheEntry>()) as isize);
@@ -254,7 +334,8 @@ impl PatchingCacheContent {
         }
     }
 
-    fn entry_mut(&self, idx: usize) -> &mut PatchingCacheEntry {
+    #[inline]
+    pub fn entry_mut(&self, idx: usize) -> &mut PatchingCacheEntry {
         let addr = unsafe { self.entry_data_ptr::<u8>() };
         unsafe {
             let addr = addr.offset((idx * mem::size_of::<PatchingCacheEntry>()) as isize);
@@ -262,7 +343,8 @@ impl PatchingCacheContent {
         }
     }
 
-    fn op_ref(&self, idx: usize) -> &PatchingOperation {
+    #[inline]
+    pub fn op_ref(&self, idx: usize) -> &PatchingOperation {
         unsafe {
             let addr = self
                 .op_data_ptr::<u8>()
@@ -271,6 +353,7 @@ impl PatchingCacheContent {
         }
     }
 
+    #[inline]
     unsafe fn op_ptr(&self, idx: usize) -> *const PatchingOperation {
         let addr = self
             .op_data_ptr::<u8>()
@@ -278,7 +361,8 @@ impl PatchingCacheContent {
         addr as *const PatchingOperation
     }
 
-    fn op_mut(&self, idx: usize) -> &mut PatchingOperation {
+    #[inline]
+    pub fn op_mut(&self, idx: usize) -> &mut PatchingOperation {
         unsafe {
             let addr = self
                 .op_data_ptr::<u8>()
@@ -287,7 +371,7 @@ impl PatchingCacheContent {
         }
     }
 
-    pub fn memory_occupied(entry_size: usize, op_size: usize) -> usize {
+    pub fn estimate_memory_occupied(entry_size: usize, op_size: usize) -> usize {
         mem::size_of::<Self>()
             + entry_size / 8
             + op_size / 8
@@ -298,74 +382,93 @@ impl PatchingCacheContent {
 
     /// Initialize the content.
     /// NOTE: This function must be called before any other!
-    pub fn init(&mut self, entry_size: usize, op_size: usize) {
+    pub fn init(&mut self, entry_size: usize, op_size: usize, create: bool) {
         let entry_bitmap_len = entry_size.div_ceil(8);
         let op_bitmap_len = op_size.div_ceil(8);
 
         // Memory layout
-        // - data address
+        // - data address (aligned)
         // - entry bitmap [u8]
-        // - padding
+        // - padding for PatchingCacheEntry alignment
         // - [PatchingCacheEntry]
         // - op bitmap [u8]
+        // - padding for PatchingOperation alignment
         // - [PatchingOperation]
-        // - padding
 
-        // Adjust the offset of the entry and operation table
-        // so they are aligned to the alignment of the entry and operation.
-        let a = mem::align_of::<PatchingCacheEntry>();
-        let offset = self.data.as_ptr() as usize % a + entry_bitmap_len;
-        self.entry_data_offset = offset + a - (offset % a);
+        // Since the shared memory base address is now guaranteed to be aligned
+        // to the maximum alignment requirement, we can use simpler calculations
 
+        // Calculate entry data offset with proper alignment
+        let entry_align = mem::align_of::<PatchingCacheEntry>();
+        self.entry_data_offset = (entry_bitmap_len + entry_align - 1) & !(entry_align - 1);
+
+        // Calculate op bitmap offset
         let op_bitmap_offset =
             self.entry_data_offset + entry_size * mem::size_of::<PatchingCacheEntry>();
-        let a = mem::align_of::<PatchingOperation>();
-        let offset = self.data.as_ptr() as usize % a + op_bitmap_offset + op_bitmap_len;
-        self.op_data_offset = offset + a - (offset % a);
 
-        #[cfg(debug_assertions)]
-        {
-            println!(
-                "mem::size_of::<PatchingCacheEntry>(): {}",
-                mem::size_of::<PatchingCacheEntry>()
-            );
-            println!(
-                "mem::align_of::<PatchingCacheEntry>(): {}",
-                mem::align_of::<PatchingCacheEntry>()
-            );
-            println!(
-                "mem::size_of::<PatchingOperation>(): {}",
-                mem::size_of::<PatchingOperation>()
-            );
-            println!(
-                "mem::align_of::<PatchingOperation>(): {}",
-                mem::align_of::<PatchingOperation>()
-            );
-            println!("data: {:p}", self.data.as_ptr());
-            println!("data + entry_data_offset: {:p}", unsafe {
-                self.data.as_ptr().offset(self.entry_data_offset as isize)
-            });
-            println!("data + op_bitmap_offset: {:p}", unsafe {
-                self.data.as_ptr().offset(op_bitmap_offset as isize)
-            });
-            println!("data + op_data_offset: {:p}", unsafe {
-                self.data.as_ptr().offset(self.op_data_offset as isize)
-            });
-        }
+        // Calculate op data offset with proper alignment
+        let op_align = mem::align_of::<PatchingOperation>();
+        self.op_data_offset = (op_bitmap_offset + op_bitmap_len + op_align - 1) & !(op_align - 1);
+
+        // #[cfg(debug_assertions)]
+        // {
+        //     println!(
+        //         "mem::size_of::<PatchingCacheEntry>(): {}",
+        //         mem::size_of::<PatchingCacheEntry>()
+        //     );
+        //     println!(
+        //         "mem::align_of::<PatchingCacheEntry>(): {}",
+        //         mem::align_of::<PatchingCacheEntry>()
+        //     );
+        //     println!(
+        //         "mem::size_of::<PatchingOperation>(): {}",
+        //         mem::size_of::<PatchingOperation>()
+        //     );
+        //     println!(
+        //         "mem::align_of::<PatchingOperation>(): {}",
+        //         mem::align_of::<PatchingOperation>()
+        //     );
+        //     println!("data: {:p}", self.data.as_ptr());
+        //     println!("data + entry_data_offset: {:p}", unsafe {
+        //         self.data.as_ptr().offset(self.entry_data_offset as isize)
+        //     });
+        //     println!("data + op_bitmap_offset: {:p}", unsafe {
+        //         self.data.as_ptr().offset(op_bitmap_offset as isize)
+        //     });
+        //     println!("data + op_data_offset: {:p}", unsafe {
+        //         self.data.as_ptr().offset(self.op_data_offset as isize)
+        //     });
+
+        //     // Verify alignment
+        //     let entry_ptr = unsafe { self.data.as_ptr().offset(self.entry_data_offset as isize) };
+        //     let op_ptr = unsafe { self.data.as_ptr().offset(self.op_data_offset as isize) };
+        //     assert_eq!(
+        //         entry_ptr as usize % entry_align,
+        //         0,
+        //         "Entry data not aligned"
+        //     );
+        //     assert_eq!(op_ptr as usize % op_align, 0, "Op data not aligned");
+
+        //     println!(
+        //         "Entry data alignment verified: {}",
+        //         entry_ptr as usize % entry_align == 0
+        //     );
+        //     println!(
+        //         "Op data alignment verified: {}",
+        //         op_ptr as usize % op_align == 0
+        //     );
+        // }
 
         self.entry_table_size = entry_size;
         self.op_table_size = op_size;
 
-        // 直接使用指针初始化 bitmap，不需要临时 slice
-        self.entry_bitmap = Bitmap::new(self.data.as_mut_ptr(), entry_bitmap_len);
-
-        self.op_bitmap = Bitmap::new(
+        self.entry_bitmap
+            .init(self.data.as_mut_ptr(), entry_bitmap_len, create);
+        self.op_bitmap.init(
             unsafe { self.data.as_mut_ptr().offset(op_bitmap_offset as isize) },
             op_bitmap_len,
+            create,
         );
-
-        self.entry_bitmap.clear();
-        self.op_bitmap.clear();
     }
 
     fn entry_space_size(&self) -> usize {
@@ -387,6 +490,16 @@ impl PatchingCacheContent {
     pub fn clear(&mut self) {
         self.entry_bitmap.clear();
         self.op_bitmap.clear();
+    }
+
+    pub fn ops(&self, idx: usize) -> Vec<PatchingOperation> {
+        let mut ops = vec![];
+        let mut op_idx = self.entry_ref(idx).op_head_idx;
+        while let Some(idx) = op_idx {
+            ops.push(self.op_ref(idx).clone());
+            op_idx = self.op_ref(idx).next_idx;
+        }
+        ops
     }
 
     pub fn find_ops(&self, id: PatchPointID) -> Result<Vec<&PatchingOperation>> {
@@ -420,7 +533,7 @@ impl PatchingCacheContent {
     fn allocate_entry(&mut self) -> Result<(usize, &mut PatchingCacheEntry)> {
         let free_idx = self.entry_bitmap.find_first_clear()?;
 
-        if mem::size_of::<PatchingCacheEntry>() * (free_idx + 1) >= self.entry_space_size() {
+        if mem::size_of::<PatchingCacheEntry>() * (free_idx + 1) > self.entry_space_size() {
             log::error!("Found free entry slot, but not enough space to store the entry");
             return Err(anyhow::anyhow!(
                 "Found free entry slot, but not enough space to store the entry"
@@ -437,7 +550,7 @@ impl PatchingCacheContent {
     fn allocate_op(&mut self) -> Result<(usize, &mut PatchingOperation)> {
         let free_idx = self.op_bitmap.find_first_clear()?;
 
-        if mem::size_of::<PatchingOperation>() * (free_idx + 1) >= self.op_space_size() {
+        if mem::size_of::<PatchingOperation>() * (free_idx + 1) > self.op_space_size() {
             log::error!("Found free op slot, but not enough space to store the operation");
             return Err(anyhow::anyhow!(
                 "Found free op slot, but not enough space to store the operation"
@@ -451,7 +564,31 @@ impl PatchingCacheContent {
         Ok((free_idx, op_mut))
     }
 
-    pub fn push_op_batch(&mut self, id: PatchPointID, ops: &Vec<PatchingOperation>) -> Result<()> {
+    pub fn clear_ops(&mut self, idx: usize) -> Result<()> {
+        let mut op_idx = self.entry_ref(idx).op_head_idx;
+        while let Some(idx) = op_idx {
+            self.op_bitmap.clear_at(idx)?;
+            op_idx = self.op_ref(idx).next_idx;
+        }
+        Ok(())
+    }
+
+    pub fn reset_all_entry_op(&mut self) {
+        self.entry_bitmap.iter().for_each(|idx| {
+            let entry = self.entry_mut(idx);
+            entry.metadata.op_idx = entry.op_head_idx;
+        });
+    }
+
+    pub fn push_op_batch(
+        &mut self,
+        idx: usize,
+        ops: &Vec<PatchingOperation>,
+    ) -> Result<Option<usize>> {
+        if ops.len() == 0 {
+            return Ok(None);
+        }
+
         if ops.len() * mem::size_of::<PatchingOperation>() > self.op_space_left() {
             return Err(anyhow::anyhow!("Not enough space to store the operations"));
         }
@@ -474,12 +611,7 @@ impl PatchingCacheContent {
             }
         }
 
-        let entry = self.find_entry_mut(id);
-        if entry.is_none() {
-            return Err(anyhow::anyhow!("Entry not found"));
-        }
-
-        let (_, entry) = entry.unwrap();
+        let entry = self.entry_mut(idx);
         if entry.op_head_idx.is_none() {
             // The entry does not have any operations before.
             entry.op_head_idx = Some(free_op_indices[0]);
@@ -490,32 +622,33 @@ impl PatchingCacheContent {
             self.op_mut(tail_op_idx).next_idx = Some(free_op_indices[0]);
         }
 
-        Ok(())
+        Ok(Some(free_op_indices[0]))
     }
 
-    pub fn push_op(&mut self, id: PatchPointID, op: &PatchingOperation) -> Result<()> {
-        let entry = self.find_entry(id);
-        if entry.is_none() {
-            return Err(anyhow::anyhow!("Entry not found"));
+    pub fn push_op(&mut self, idx: usize, op: &PatchingOperation) -> Result<usize> {
+        // Check if the entry of idx exists.
+        if !self.entry_bitmap.is_set(idx)? {
+            return Err(anyhow::anyhow!(format!("Entry of idx {} not found", idx)));
         }
 
-        let (_, entry) = entry.unwrap();
+        let entry = self.entry_ref(idx);
+
         if entry.op_head_idx.is_none() {
             // The operation to be pushed is the first one.
-            let (idx, op_mut) = self.allocate_op()?;
+            let (op_idx, op_mut) = self.allocate_op()?;
             *op_mut = *op;
-            let entry = self.find_entry_mut(id).unwrap().1;
-            entry.op_head_idx = Some(idx);
-            entry.op_tail_idx = Some(idx);
+            let entry = self.entry_mut(idx);
+            entry.op_head_idx = Some(op_idx);
+            entry.op_tail_idx = Some(op_idx);
+            Ok(op_idx)
         } else {
             let tail_op_idx = entry.op_tail_idx.unwrap();
-            let (idx, op_mut) = self.allocate_op()?;
+            let (op_idx, op_mut) = self.allocate_op()?;
             *op_mut = *op;
-            self.op_mut(tail_op_idx).next_idx = Some(idx);
-            self.find_entry_mut(id).unwrap().1.op_tail_idx = Some(idx);
+            self.op_mut(tail_op_idx).next_idx = Some(op_idx);
+            self.entry_mut(idx).op_tail_idx = Some(op_idx);
+            Ok(op_idx)
         }
-
-        Ok(())
     }
 
     /// NOTE: The returned referencers are only valid as long as no entries are added
@@ -536,18 +669,20 @@ impl PatchingCacheContent {
             .collect()
     }
 
-    pub fn push(&mut self, entry: &PatchingCacheEntry) -> Result<()> {
+    pub fn push(&mut self, entry: PatchingCacheEntry) -> Result<usize> {
         if entry.size() > self.entry_space_left() {
             return Err(anyhow::anyhow!("Not enough space to store the entry"));
         }
 
-        let (_, entry_mut) = self.allocate_entry()?;
-        *entry_mut = entry.clone();
+        let (idx, entry_mut) = self.allocate_entry()?;
+        *entry_mut = entry;
+        entry_mut.op_head_idx = None;
+        entry_mut.op_tail_idx = None;
 
-        Ok(())
+        Ok(idx)
     }
 
-    fn find_entry(&self, id: PatchPointID) -> Option<(usize, &PatchingCacheEntry)> {
+    pub fn find_entry(&self, id: PatchPointID) -> Option<(usize, &PatchingCacheEntry)> {
         self.entry_bitmap
             .iter()
             .find(|idx| {
@@ -652,22 +787,47 @@ impl PatchingCacheContent {
         return Ok(());
     }
 
-    pub fn remove(&mut self, id: PatchPointID) -> Result<()> {
-        let res = self.find_entry(id);
-        if res.is_none() {
-            return Err(anyhow::anyhow!("Entry not found"));
-        }
-
-        let (idx, entry) = res.unwrap();
-
+    fn remove_entry_ops(&mut self, idx: usize) -> Result<()> {
+        let entry = self.entry_mut(idx);
         let mut op_idx = entry.op_head_idx;
         while let Some(idx) = op_idx {
             self.op_bitmap.clear_at(idx)?;
             op_idx = self.op_ref(idx).next_idx;
         }
+        let entry = self.entry_mut(idx);
+        entry.op_head_idx = None;
+        entry.op_tail_idx = None;
+        Ok(())
+    }
 
+    fn remove_entry_idx(&mut self, idx: usize) -> Result<()> {
         self.entry_bitmap.clear_at(idx)?;
         Ok(())
+    }
+
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&PatchingCacheEntry) -> bool,
+    {
+        self.entry_bitmap.iter().for_each(|idx| {
+            if !f(self.entry_ref(idx)) {
+                self.remove_entry_idx(idx).unwrap();
+            }
+        });
+    }
+
+    pub fn remove(&mut self, id: PatchPointID) -> Result<usize> {
+        let res = self.find_entry(id);
+        if res.is_none() {
+            return Err(anyhow::anyhow!("Entry not found"));
+        }
+
+        let (idx, _) = res.unwrap();
+
+        self.remove_entry_ops(idx)?;
+        self.remove_entry_idx(idx)?;
+
+        Ok(idx)
     }
 
     pub fn op_count(&self) -> usize {
@@ -695,12 +855,23 @@ impl PatchingCacheContent {
         });
         println!();
     }
+
+    pub fn print_entry_bitmap(&self, start: usize, length: usize) {
+        self.entry_bitmap.print(start, length);
+    }
+
+    pub fn print_op_bitmap(&self, start: usize, length: usize) {
+        self.op_bitmap.print(start, length);
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::util;
+    use crate::{
+        patching_cache::{PatchingCache, PatchingCacheEntryFlags},
+        util,
+    };
     use std::assert_matches::assert_matches;
 
     fn dummy_op(operand: u64) -> PatchingOperation {
@@ -726,9 +897,9 @@ mod test {
 
     #[test]
     fn test_push_remove() {
-        let size = PatchingCacheContent::memory_occupied(100, 100);
+        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
         let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100);
+        content.init(100, 100, true);
 
         let init_space_left = content.entry_space_left();
 
@@ -737,14 +908,14 @@ mod test {
         assert_eq!(ret.len(), 0);
 
         // Test push e0
-        let e0 = dummy_entry(0);
-        let _ret = content.push(&e0).expect("Failed to push e0");
+        let mut e0 = dummy_entry(0);
+        let _ret = content.push(e0.clone()).expect("Failed to push e0");
         assert_eq!(content.entry_count(), 1);
         assert_eq!(content.entries().len(), 1);
 
         // Test push e1
-        let e1 = dummy_entry(1);
-        let _ret = content.push(&e1).expect("Failed to push e1");
+        let mut e1 = dummy_entry(1);
+        let _ret = content.push(e1.clone()).expect("Failed to push e1");
         assert_eq!(content.entries().len(), 2);
 
         // Test query e1
@@ -753,21 +924,22 @@ mod test {
 
         // Test push e0 with op
         let op = dummy_op(1);
-        content.push_op(e0.id(), &op).expect("Failed to push op");
+        content.push_op(0, &op).expect("Failed to push op");
         let (_, e0_ref) = content.find_entry(e0.id()).expect("Failed to find e0");
         assert_eq!(e0_ref.op_head_idx.is_some(), true);
         assert_eq!(e0_ref.op_head_idx.unwrap(), 0);
         assert_eq!(content.op_count(), 1);
         assert_eq!(content.entry_count(), 2);
 
+        let (e1_idx, _) = content.find_entry(e1.id()).expect("Failed to find e1");
         content
-            .push_op(e1.id(), &dummy_op(0))
+            .push_op(e1_idx, &dummy_op(0))
             .expect("Failed to push op");
         content
-            .push_op(e1.id(), &dummy_op(1))
+            .push_op(e1_idx, &dummy_op(1))
             .expect("Failed to push op");
         content
-            .push_op(e1.id(), &dummy_op(2))
+            .push_op(e1_idx, &dummy_op(2))
             .expect("Failed to push op");
         assert_eq!(content.op_count(), 4);
         assert_eq!(content.entry_count(), 2);
@@ -828,13 +1000,13 @@ mod test {
         assert_eq!(e0_ref.is_none(), true);
 
         content
-            .push_op(e1.id(), &dummy_op(0))
+            .push_op(e1_idx, &dummy_op(0))
             .expect("Failed to push op");
         content
-            .push_op(e1.id(), &dummy_op(5))
+            .push_op(e1_idx, &dummy_op(5))
             .expect("Failed to push op");
         content
-            .push_op(e1.id(), &dummy_op(6))
+            .push_op(e1_idx, &dummy_op(6))
             .expect("Failed to push op");
         content.remove_op(e1.id(), 0).expect("Failed to remove op");
         println!("after push ops on e1: ");
@@ -848,33 +1020,88 @@ mod test {
     }
 
     #[test]
-    fn test_max_entries() {
-        let size = 1024 * 1024 * 1024;
-        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100);
+    fn test_union() {
+        let mut cache = PatchingCache::new(100, 100).unwrap();
 
-        for i in 0..PATCHING_CACHE_ENTRY_BM_CAP {
-            assert_ne!(i as u64, u64::MAX);
+        for i in 0..10 {
+            let mut e = dummy_entry(i as u64);
+            e.set_flag(PatchingCacheEntryFlags::Patching);
+            cache.content_mut().push(e).expect("Failed to push entry");
+            for j in 0..i {
+                cache
+                    .content_mut()
+                    .push_op(i, &dummy_op(j as u64))
+                    .expect("Failed to push op");
+            }
+        }
+
+        let mut another_cache = PatchingCache::new(100, 100).unwrap();
+        for i in 10..20 {
+            let mut e = dummy_entry(i as u64);
+            e.set_flag(PatchingCacheEntryFlags::Patching);
+            another_cache
+                .content_mut()
+                .push(e)
+                .expect("Failed to push entry");
+        }
+        for i in 10..15 {
+            let (idx, _) = another_cache
+                .content()
+                .find_entry(PatchPointID::from(i as u64))
+                .unwrap();
+            another_cache
+                .content_mut()
+                .entry_mut(idx)
+                .set_flag(PatchingCacheEntryFlags::Tracing);
+        }
+
+        cache.union(&another_cache).expect("Failed to union");
+        assert_eq!(cache.content().entry_count(), 20);
+        cache.content().print_entries();
+        cache.content().print_ops();
+    }
+
+    #[test]
+    fn test_max_size() {
+        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
+        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
+        content.init(100, 100, true);
+
+        for i in 0..100 {
             let e = dummy_entry(i as u64);
-            assert_matches!(content.push(&e), Ok(..));
+            println!("pushing entry: {:?}", i);
+            assert_matches!(content.push(e), Ok(..));
         }
 
         let e = dummy_entry(u64::MAX);
-        assert_matches!(content.push(&e), Err(..));
+        assert_matches!(content.push(e), Err(..));
+
+        let (e0_idx, e0) = content.find_entry(PatchPointID::from(0u32)).unwrap();
+        let e0_id = e0.id();
+        for i in 0..100 {
+            assert_matches!(content.push_op(e0_idx, &dummy_op(i as u64)), Ok(..));
+        }
+
+        content.remove(e0_id).expect("Failed to remove entry");
+        assert_eq!(content.entry_count(), 99);
+        assert_eq!(content.op_count(), 0);
+
+        assert_matches!(content.push(dummy_entry(101)), Ok(..));
+        assert_matches!(content.push(dummy_entry(1)), Err(..));
     }
 
     #[test]
     fn test_consolidate_and_restore() {
-        let size = PatchingCacheContent::memory_occupied(100, 100);
+        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
         let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100);
+        content.init(100, 100, true);
 
         for i in 0..10 {
             let e = dummy_entry(i as u64);
-            content.push(&e).expect("Failed to push entry");
+            let idx = content.push(e.clone()).expect("Failed to push entry");
             for j in 0..i {
                 content
-                    .push_op(e.id(), &dummy_op(j as u64))
+                    .push_op(idx, &dummy_op(j as u64))
                     .expect("Failed to push op");
             }
             for j in 0..(i / 2) {
@@ -891,10 +1118,15 @@ mod test {
             "before consolidation, entry_cnt: {}, op_cnt: {}",
             entry_cnt, op_cnt
         );
+        let package = content.consolidate_package();
+        println!("package: {:#?}", package);
 
-        let package = content.consolidate();
+        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
+        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
+        content.init(100, 100, true);
+
         content
-            .load_consolidate_package(package)
+            .load_consolidate_package(&package)
             .expect("Failed to load package");
 
         assert_eq!(content.entry_count(), entry_cnt);

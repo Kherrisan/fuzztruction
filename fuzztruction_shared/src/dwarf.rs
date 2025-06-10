@@ -23,6 +23,7 @@ use strum_macros::AsRefStr;
     PartialOrd,
     Ord,
     TryFromPrimitive,
+    Hash,
 )]
 pub enum DwarfReg {
     Rax = 0,

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub enum InstrumentMethod {
     StackSpill = 0,
     Direct = 1,
+    NOP = 2,
 }
 
 impl Into<u32> for &InstrumentMethod {
@@ -25,6 +26,7 @@ impl Into<u32> for &InstrumentMethod {
         match self {
             InstrumentMethod::StackSpill => 0,
             InstrumentMethod::Direct => 1,
+            InstrumentMethod::NOP => 2,
         }
     }
 }
@@ -36,6 +38,7 @@ impl TryFrom<u32> for InstrumentMethod {
         Ok(match value {
             0 => InstrumentMethod::StackSpill,
             1 => InstrumentMethod::Direct,
+            2 => InstrumentMethod::NOP,
             _ => return Err(format!("Invalid instrument method: {}", value)),
         })
     }
@@ -64,16 +67,17 @@ impl<'de> Deserialize<'de> for InstrumentMethod {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPointIR {
     pub id: u32,
-    pub svfg_id: u32,
-    pub pag_id: u32,
-    pub icfg_id: u32,
+    pub svfg_id: Option<u32>,
+    pub pag_id: Option<u32>,
+    pub icfg_id: Option<u32>,
     pub module: String,
     pub file: String,
     pub line: u32,
     pub col: u32,
     pub function: String,
+    pub func_idx: u32,
     pub ins: LLVMInstruction,
-    pub var: VarDeclRef,
+    pub var: Option<VarDeclRef>,
     pub method: InstrumentMethod,
     #[serde(skip)]
     pub is_func_entry: bool,
@@ -83,7 +87,7 @@ pub struct PatchPointIR {
 
 impl PatchPointIR {
     pub fn var_with_loc(&self) -> String {
-        format!("{}({}:{}:{})", self.var, self.file, self.line, self.col)
+        format!("{}({}:{}:{})", self.var.as_ref().unwrap(), self.file, self.line, self.col)
     }
 }
 
@@ -168,15 +172,15 @@ impl PatchPoint {
 
     pub fn var_with_loc(&self) -> String {
         let ir = self.ir.as_ref().unwrap();
-        format!("{}({}:{}:{})", ir.var, ir.file, ir.line, ir.col)
+        format!("{}({}:{}:{})", self.var().unwrap(), ir.file, ir.line, ir.col)
     }
 
-    pub fn var(&self) -> &VarDeclRef {
-        &self.ir.as_ref().unwrap().var
+    pub fn var(&self) -> Option<&VarDeclRef> {
+        self.ir.as_ref().unwrap().var.as_ref()
     }
 
-    pub fn var_type(&self) -> &VarType {
-        self.ir.as_ref().unwrap().var.type_enum()
+    pub fn var_type(&self) -> Option<&VarType> {
+        self.var().map(|v| v.type_enum())
     }
 
     pub fn ir(&self) -> &Option<PatchPointIR> {
@@ -272,10 +276,10 @@ impl PatchPoint {
                 let spill_slot_location = &locations[0];
                 assert_matches!(
                     spill_slot_location.loc_type,
-                    LocationType::Register | LocationType::Direct
+                    LocationType::Register | LocationType::Direct | LocationType::Constant
                 );
 
-                assert!(locations[1].loc_type == LocationType::Constant);
+                // assert!(locations[1].loc_type == LocationType::Constant);
                 let target_value_size = locations[1].offset_or_constant;
                 // // The size of the recorded value must be positive.
                 // assert!(target_value_size > 0);

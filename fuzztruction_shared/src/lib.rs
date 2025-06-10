@@ -31,3 +31,5 @@ pub mod serializer;
 pub mod finite_integer_set;
 pub mod patchpoint;
 pub mod var;
+pub mod func_block_addr;
+pub mod func_addr;

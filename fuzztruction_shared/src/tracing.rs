@@ -456,6 +456,10 @@ pub fn remove_frequent_trace_entries<'a>(
         *trace_cnt.entry(entry.id).or_insert(0) += 1;
     }
 
+    // for (id, cnt) in trace_cnt.iter() {
+    //     log::warn!("trace_cnt, id: {}, cnt: {}", id, cnt);
+    // }
+
     trace_cnt.retain(|_, cnt| *cnt <= threshold);
     let tracable_ids = trace_cnt.keys().cloned().collect::<HashSet<_>>();
 
