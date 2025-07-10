@@ -1,10 +1,12 @@
 use anyhow::Result;
 use std::{
-    assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, hash::Hasher, ops::Range, path::Path
+    assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, hash::Hasher,
+    ops::Range, path::Path,
 };
 
 use crate::{
     constants::PATCH_POINT_SIZE,
+    func::FunctionId,
     patching_cache::PatchingCacheEntryFlags,
     patching_cache_entry::PatchingCacheEntry,
     types::PatchPointID,
@@ -87,7 +89,17 @@ pub struct PatchPointIR {
 
 impl PatchPointIR {
     pub fn var_with_loc(&self) -> String {
-        format!("{}({}:{}:{})", self.var.as_ref().unwrap(), self.file, self.line, self.col)
+        format!(
+            "{}({}:{}:{})",
+            self.var.as_ref().unwrap(),
+            self.file,
+            self.line,
+            self.col
+        )
+    }
+
+    pub fn function_id(&self) -> FunctionId {
+        (&self.function).into()
     }
 }
 
@@ -172,7 +184,13 @@ impl PatchPoint {
 
     pub fn var_with_loc(&self) -> String {
         let ir = self.ir.as_ref().unwrap();
-        format!("{}({}:{}:{})", self.var().unwrap(), ir.file, ir.line, ir.col)
+        format!(
+            "{}({}:{}:{})",
+            self.var().unwrap(),
+            ir.file,
+            ir.line,
+            ir.col
+        )
     }
 
     pub fn var(&self) -> Option<&VarDeclRef> {
@@ -183,8 +201,12 @@ impl PatchPoint {
         self.var().map(|v| v.type_enum())
     }
 
-    pub fn ir(&self) -> &Option<PatchPointIR> {
-        &self.ir
+    pub fn ir(&self) -> &PatchPointIR {
+        self.ir.as_ref().unwrap()
+    }
+
+    pub fn has_ir(&self) -> bool {
+        self.ir.is_some()
     }
 
     pub fn ir_mut(&mut self) -> &mut Option<PatchPointIR> {

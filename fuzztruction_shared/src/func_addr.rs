@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, hash::Hash, io::BufReader, path::Path};
+use std::{collections::HashMap, fs::File, io::BufReader, path::Path};
 
 use serde::{Deserialize, Serialize};
 
