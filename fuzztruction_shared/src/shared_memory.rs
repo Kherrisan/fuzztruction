@@ -36,7 +36,7 @@ impl MmapShMem {
         let mut size = size;
 
         log::debug!(
-            "shm_ (name={:#?}, create={create}, size={size:x} ({size_kb}))",
+            "shm_ (name={:#?}, create={create}, size={size:x} ({size_kb} KB))",
             path,
             size_kb = size / 1024
         );

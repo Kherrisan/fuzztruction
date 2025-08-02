@@ -65,6 +65,15 @@ impl<'de> Deserialize<'de> for InstrumentMethod {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StateVarType {
+    #[serde(rename = "arg")]
+    Arg,
+
+    #[serde(rename = "ret")]
+    Ret,
+}
+
 /// Static information about an llvm patch point.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPointIR {
@@ -72,6 +81,7 @@ pub struct PatchPointIR {
     pub svfg_id: Option<u32>,
     pub pag_id: Option<u32>,
     pub icfg_id: Option<u32>,
+    pub is_state_var: Option<StateVarType>,
     pub module: String,
     pub file: String,
     pub line: u32,
@@ -296,6 +306,9 @@ impl PatchPoint {
                 assert_eq!(locations.len(), 2);
 
                 let spill_slot_location = &locations[0];
+                if spill_slot_location.loc_type == LocationType::ConstIndex {
+                    println!("patchpoint ir id: {}", record.patch_point_id);
+                }
                 assert_matches!(
                     spill_slot_location.loc_type,
                     LocationType::Register | LocationType::Direct | LocationType::Constant

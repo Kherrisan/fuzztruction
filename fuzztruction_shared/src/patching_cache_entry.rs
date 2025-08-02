@@ -30,6 +30,21 @@ pub enum PatchingOperator {
     Jmp = 11,
 }
 
+pub const PATCHING_OPERATORS: [PatchingOperator; 12] = [
+    PatchingOperator::Nop,
+    PatchingOperator::Add,
+    PatchingOperator::Sub,
+    PatchingOperator::Shl,
+    PatchingOperator::Shr,
+    PatchingOperator::And,
+    PatchingOperator::Or,
+    PatchingOperator::Xor,
+    PatchingOperator::Not,
+    PatchingOperator::Set,
+    PatchingOperator::Clear,
+    PatchingOperator::Jmp,
+];
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PatchingOperation {
@@ -268,12 +283,12 @@ impl PatchingCacheEntry {
         self.unset_flag(PatchingCacheEntryFlags::Tracing)
     }
 
-    pub fn enable_mutation(&mut self) -> &mut Self {
-        self.unset_flag(PatchingCacheEntryFlags::Patching)
+    pub fn enable_patching(&mut self) -> &mut Self {
+        self.set_flag(PatchingCacheEntryFlags::Patching)
     }
 
-    pub fn disable_mutation(&mut self) -> &mut Self {
-        self.set_flag(PatchingCacheEntryFlags::Patching)
+    pub fn disable_patching(&mut self) -> &mut Self {
+        self.unset_flag(PatchingCacheEntryFlags::Patching)
     }
 
     pub fn set_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {

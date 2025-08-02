@@ -1,7 +1,7 @@
-use std::{fmt::Debug, mem};
+use std::{cell::RefCell, fmt::Debug, mem, rc::Rc};
 
 use crate::{
-    patching_cache::PatchingCache,
+    patching_cache::{PatchingCache, PatchingCacheEntryFlags},
     patching_cache_entry::{PatchingCacheEntry, PatchingOperation},
     types::PatchPointID,
 };
@@ -9,48 +9,48 @@ use crate::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq, Default)]
-pub struct PatchingCacheContentPackage {
-    entry_size: usize,
+// #[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq, Default)]
+// pub struct PatchingCacheContentPackage {
+//     entry_size: usize,
 
-    op_size: usize,
+//     op_size: usize,
 
-    pub entries: Vec<PatchingCacheEntry>,
+//     pub entries: Vec<PatchingCacheEntry>,
 
-    ops: Vec<(usize, PatchingOperation)>,
-}
+//     ops: Vec<(usize, PatchingOperation)>,
+// }
 
-impl From<&PatchingCache> for PatchingCacheContentPackage {
-    fn from(pc: &PatchingCache) -> Self {
-        pc.content().consolidate_package()
-    }
-}
+// impl From<&PatchingCache> for PatchingCacheContentPackage {
+//     fn from(pc: &PatchingCache) -> Self {
+//         pc.content().consolidate_package()
+//     }
+// }
 
-impl From<PatchingCache> for PatchingCacheContentPackage {
-    fn from(pc: PatchingCache) -> Self {
-        pc.content().consolidate_package()
-    }
-}
+// impl From<PatchingCache> for PatchingCacheContentPackage {
+//     fn from(pc: PatchingCache) -> Self {
+//         pc.content().consolidate_package()
+//     }
+// }
 
-impl Into<PatchingCache> for &PatchingCacheContentPackage {
-    fn into(self) -> PatchingCache {
-        let mut pc = PatchingCache::new(self.entry_size, self.op_size).unwrap();
-        pc.load_package(&self).unwrap();
-        pc
-    }
-}
+// impl Into<PatchingCache> for &PatchingCacheContentPackage {
+//     fn into(self) -> PatchingCache {
+//         let mut pc = PatchingCache::new(self.entry_size, self.op_size).unwrap();
+//         pc.load_package(&self).unwrap();
+//         pc
+//     }
+// }
 
-impl std::fmt::Debug for PatchingCacheContentPackage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PatchingCacheContentPackage {{")?;
-        write!(
-            f,
-            " entry_size: {}, op_size: {}",
-            self.entry_size, self.op_size
-        )?;
-        write!(f, " }}")
-    }
-}
+// impl std::fmt::Debug for PatchingCacheContentPackage {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         write!(f, "PatchingCacheContentPackage {{")?;
+//         write!(
+//             f,
+//             " entry_size: {}, op_size: {}",
+//             self.entry_size, self.op_size
+//         )?;
+//         write!(f, " }}")
+//     }
+// }
 pub struct BitmapIter {
     bitmap_ptr: *const Bitmap,
     current_index: usize,
@@ -252,6 +252,13 @@ impl std::fmt::Debug for PatchingCacheContent {
 }
 
 impl PatchingCacheContent {
+    pub fn entry_table_size(&self) -> usize {
+        self.entry_table_size
+    }
+    pub fn op_table_size(&self) -> usize {
+        self.op_table_size
+    }
+
     pub fn iter(&self) -> BitmapIter {
         self.entry_bitmap.iter()
     }
@@ -268,45 +275,27 @@ impl PatchingCacheContent {
         self.data.as_ptr()
     }
 
-    pub fn consolidate_package(&self) -> PatchingCacheContentPackage {
-        let mut entries = vec![];
-        let mut ops = vec![];
+    // pub fn clean_load_patching_table(
+    //     &mut self,
+    //     ctx: Rc<RefCell<AnalysisContext>>,
+    //     table: &PatchingTable,
+    // ) -> Result<()> {
+    //     self.clear();
 
-        self.entry_bitmap.iter().for_each(|idx| {
-            entries.push(self.entry_ref(idx).clone());
-        });
+    //     self.init(table.entry_size, table.op_size, true);
 
-        self.op_bitmap.iter().for_each(|idx| {
-            ops.push((idx, self.op_ref(idx).clone()));
-        });
+    //     for (i, (pp_id, ops)) in table.tbl.iter().enumerate() {
+    //         *self.entry_mut(i) = entry.clone();
+    //         self.entry_bitmap.set(i)?;
+    //     }
 
-        PatchingCacheContentPackage {
-            entry_size: self.entry_table_size,
-            op_size: self.op_table_size,
-            entries,
-            ops,
-        }
-    }
+    //     for (idx, op) in package.ops.iter() {
+    //         *self.op_mut(*idx) = op.clone();
+    //         self.op_bitmap.set(*idx)?;
+    //     }
 
-    pub fn load_consolidate_package(
-        &mut self,
-        package: &PatchingCacheContentPackage,
-    ) -> Result<()> {
-        self.clear();
-        self.init(package.entry_size, package.op_size, true);
-
-        for (i, entry) in package.entries.iter().enumerate() {
-            *self.entry_mut(i) = entry.clone();
-            self.entry_bitmap.set(i)?;
-        }
-
-        for (idx, op) in package.ops.iter() {
-            *self.op_mut(*idx) = op.clone();
-            self.op_bitmap.set(*idx)?;
-        }
-
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[inline]
     unsafe fn entry_data_ptr<T>(&self) -> *const T {
@@ -372,12 +361,37 @@ impl PatchingCacheContent {
     }
 
     pub fn estimate_memory_occupied(entry_size: usize, op_size: usize) -> usize {
-        mem::size_of::<Self>()
-            + entry_size / 8
-            + op_size / 8
-            + entry_size * mem::size_of::<PatchingCacheEntry>()
-            + op_size * mem::size_of::<PatchingOperation>()
-            + 128 // Leave for padding
+        let entry_bitmap_len = entry_size.div_ceil(8);
+        let op_bitmap_len = op_size.div_ceil(8);
+
+        // 计算内存布局，与 init 方法完全一致
+        let entry_align = mem::align_of::<PatchingCacheEntry>();
+        let op_align = mem::align_of::<PatchingOperation>();
+        let max_align = std::cmp::max(
+            std::cmp::max(entry_align, op_align), 
+            mem::align_of::<PatchingCacheContent>()
+        );
+
+        // 基础结构大小（包括 PatchingCacheContent 本身）
+        let base_size = mem::size_of::<Self>();
+
+        // 计算 entry 数据偏移（从 data 开始计算，考虑对齐）
+        let entry_data_offset = (entry_bitmap_len + entry_align - 1) & !(entry_align - 1);
+
+        // 计算 op bitmap 偏移
+        let op_bitmap_offset = entry_data_offset + entry_size * mem::size_of::<PatchingCacheEntry>();
+
+        // 计算 op 数据偏移（考虑对齐）
+        let op_data_offset = (op_bitmap_offset + op_bitmap_len + op_align - 1) & !(op_align - 1);
+
+        // 总大小：从 PatchingCacheContent 开始到 op 数据结束
+        let total_size = base_size + op_data_offset + op_size * mem::size_of::<PatchingOperation>();
+
+        // 确保对齐到最大对齐要求（与 shm_open 一致）
+        let aligned_size = (total_size + max_align - 1) & !(max_align - 1);
+        
+        // 确保最小内存大小不小于 PatchingCacheContent 本身的大小
+        std::cmp::max(aligned_size, mem::size_of::<Self>())
     }
 
     /// Initialize the content.
@@ -1118,37 +1132,37 @@ mod test {
             "before consolidation, entry_cnt: {}, op_cnt: {}",
             entry_cnt, op_cnt
         );
-        let package = content.consolidate_package();
-        println!("package: {:#?}", package);
+        // let package: PatchingTable = content.as_ref().into();
+        // println!("package: {:#?}", package);
 
-        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
-        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100, true);
+        // let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
+        // let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
+        // content.init(100, 100, true);
 
-        content
-            .load_consolidate_package(&package)
-            .expect("Failed to load package");
+        // content
+        //     .clean_load_patching_table(&package)
+        //     .expect("Failed to load package");
 
-        assert_eq!(content.entry_count(), entry_cnt);
-        assert_eq!(content.op_count(), op_cnt);
+        // assert_eq!(content.entry_count(), entry_cnt);
+        // assert_eq!(content.op_count(), op_cnt);
 
-        content.print_entries();
-        content.print_ops();
+        // content.print_entries();
+        // content.print_ops();
 
-        println!(
-            "after consolidation, entry_cnt: {}, op_cnt: {}",
-            content.entry_count(),
-            content.op_count()
-        );
+        // println!(
+        //     "after consolidation, entry_cnt: {}, op_cnt: {}",
+        //     content.entry_count(),
+        //     content.op_count()
+        // );
 
-        for i in 0..entry_cnt {
-            let e = content.find_entry(PatchPointID::from(i as u64)).unwrap().1;
-            let ops = content.find_ops(e.id()).expect("Failed to find ops");
-            println!("ops: {:?}", ops);
-            assert_eq!(ops.len(), i - i / 2);
-            for j in (i / 2)..i {
-                assert_eq!(ops[j - i / 2].operand, j as u64);
-            }
-        }
+        // for i in 0..entry_cnt {
+        //     let e = content.find_entry(PatchPointID::from(i as u64)).unwrap().1;
+        //     let ops = content.find_ops(e.id()).expect("Failed to find ops");
+        //     println!("ops: {:?}", ops);
+        //     assert_eq!(ops.len(), i - i / 2);
+        //     for j in (i / 2)..i {
+        //         assert_eq!(ops[j - i / 2].operand, j as u64);
+        //     }
+        // }
     }
 }

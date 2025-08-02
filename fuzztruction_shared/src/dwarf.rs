@@ -1,5 +1,4 @@
 use anyhow::Result;
-use core::panic;
 use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
 

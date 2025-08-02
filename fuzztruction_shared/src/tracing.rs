@@ -130,10 +130,11 @@ impl TraceVector {
     }
 
     pub fn new(len: usize, tag: &str) -> Result<TraceVector> {
+        log::trace!("Creating trace vector with length: {}, tag: {}", len, tag);
         let total_size = size_of::<TraceVectorHeader>() + len * size_of::<TraceVectorEntry>();
         let label = format!("trace_{}", tag);
         let mut shared_memory = MmapShMem::new_shmem(total_size, &label)?;
-        let header = TraceVectorHeader::new(true, len, &mut shared_memory)?;
+        let header = TraceVectorHeader::new(true, total_size, &mut shared_memory)?;
 
         let env_key = format!("{}_{}", ENV_FT_TRACE_SHM, tag.to_uppercase());
         shared_memory.write_to_env(&env_key)?;
@@ -176,11 +177,22 @@ impl TraceVector {
     }
 
     pub fn hit_value<T>(&mut self, id: u32, value: T) {
+        if id == 53342 {
+            println!("a");
+        }
+
         let value_bytes = unsafe {
             std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
         };
+        if id == 53342 {
+            println!("b");
+        }
 
         self.hit_slice(id, value_bytes);
+        
+        if id == 53342 {
+            println!("c");
+        }
     }
 
     pub fn hit_slice(&mut self, id: u32, value: &[u8]) {
@@ -190,6 +202,7 @@ impl TraceVector {
 
         if alignment_offset == usize::MAX {
             // 无法对齐，需要处理这种情况
+            println!("Cannot align pointer");
             panic!("Cannot align pointer");
         }
 
@@ -197,7 +210,10 @@ impl TraceVector {
         let total_size = alignment_offset + entry_size;
 
         if self.header().offset + total_size > self.memory_capacity() {
-            println!("TraceVector is full of capacity: {}", self.capacity());
+            println!("TraceVector is full of capacity after pushing this item: ");
+            println!("current offset: {}", self.header().offset);
+            println!("entry total size: {}", total_size);
+            println!("memory capacity: {}", self.memory_capacity());
             panic!("TraceVector is full of capacity: {}", self.capacity());
         }
 
@@ -374,7 +390,7 @@ struct TraceVectorHeader {
 }
 
 impl TraceVectorHeader {
-    pub fn new(create: bool, len: usize, memory: &mut MmapShMem) -> Result<*mut Self> {
+    pub fn new(create: bool, total_size: usize, memory: &mut MmapShMem) -> Result<*mut Self> {
         assert!(memory.size() >= size_of::<TraceVectorEntry>());
 
         unsafe {
@@ -383,7 +399,7 @@ impl TraceVectorHeader {
                 .expect("Failed to get header pointer");
 
             if create {
-                header.capacity = len;
+                header.capacity = total_size - size_of::<Self>();
                 header.len = 0;
                 header.offset = 0;
             }
@@ -444,39 +460,6 @@ impl TraceVectorEntry {
 }
 
 pub const TRACE_HIT_CNT_THRESHOLD: usize = 1000;
-
-pub fn remove_frequent_trace_entries<'a>(
-    entries: &[TraceItem],
-    threshold: usize,
-    _too_freq_pp_ids: Option<&mut HashSet<PatchPointID>>,
-) -> Vec<TraceItem> {
-    let len = entries.len();
-    let mut trace_cnt: HashMap<u32, usize> = HashMap::new();
-    for entry in entries {
-        *trace_cnt.entry(entry.id).or_insert(0) += 1;
-    }
-
-    // for (id, cnt) in trace_cnt.iter() {
-    //     log::warn!("trace_cnt, id: {}, cnt: {}", id, cnt);
-    // }
-
-    trace_cnt.retain(|_, cnt| *cnt <= threshold);
-    let tracable_ids = trace_cnt.keys().cloned().collect::<HashSet<_>>();
-
-    let entries: Vec<TraceItem> = entries
-        .into_iter()
-        .filter(|entry| tracable_ids.contains(&entry.id))
-        .cloned()
-        .collect();
-
-    log::trace!(
-        "remove_frequent_trace_entries: {}({:2.2}%)",
-        len - entries.len(),
-        (len - entries.len()) as f64 / len as f64 * 100.0
-    );
-
-    entries
-}
 
 impl Trace {
     pub fn from_items(items: &[TraceItem]) -> Self {

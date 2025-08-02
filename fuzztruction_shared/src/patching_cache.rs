@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     constants::ENV_SHM_NAME,
-    patching_cache_content::{BitmapIter, PatchingCacheContent, PatchingCacheContentPackage},
+    patching_cache_content::{BitmapIter, PatchingCacheContent},
     patching_cache_entry::{PatchingCacheEntry, PatchingOperation, PatchingOperator},
     patchpoint::PatchPoint,
     tracing::Trace,
@@ -120,6 +120,25 @@ pub struct PatchingCache {
     content_size: usize,
     content: PatchingCacheContentRawPtr,
     b_tree: BTreeMap<PatchPointID, usize>,
+}
+
+impl Clone for PatchingCache {
+    fn clone(&self) -> Self {
+        let new_cache = PatchingCache::new(
+            self.content().entry_table_size(),
+            self.content().op_table_size(),
+        )
+        .unwrap();
+
+        assert!(new_cache.content_size == self.content_size);
+
+        unsafe {
+            let dst = new_cache.content.0 as *mut u8;
+            let src = self.content.0 as *const u8;
+            std::ptr::copy_nonoverlapping(src, dst, self.content_size);
+        }
+        new_cache
+    }
 }
 
 impl Default for PatchingCache {
@@ -463,7 +482,7 @@ impl PatchingCache {
     pub fn new(entry_size: usize, op_size: usize) -> Result<PatchingCache> {
         let size = PatchingCacheContent::estimate_memory_occupied(entry_size, op_size);
 
-        assert!(size > std::mem::size_of::<PatchingCacheContent>());
+        assert!(size >= std::mem::size_of::<PatchingCacheContent>());
         let mut memory = util::alloc_box_aligned_zeroed::<PatchingCacheContent>(size);
         unsafe {
             std::ptr::write_bytes(memory.as_mut() as *mut PatchingCacheContent, 0, 1);
@@ -574,17 +593,17 @@ impl PatchingCache {
         self.content().entry_count()
     }
 
-    pub fn load_package(&mut self, package: &PatchingCacheContentPackage) -> Result<()> {
-        // self.content_slice_mut()[..bytes.len()].copy_from_slice(bytes);
-        // unsafe {
-        //     // Update the size since we might loaded the content from a differently
-        //     // sized cache.
-        //     (&mut *(self.content.0 as *mut MutationCacheContent)).update(self.content_size);
-        // }
+    // pub fn load_package(&mut self, package: &PatchingCacheContentPackage) -> Result<()> {
+    //     // self.content_slice_mut()[..bytes.len()].copy_from_slice(bytes);
+    //     // unsafe {
+    //     //     // Update the size since we might loaded the content from a differently
+    //     //     // sized cache.
+    //     //     (&mut *(self.content.0 as *mut MutationCacheContent)).update(self.content_size);
+    //     // }
 
-        log::trace!("Loading package into patching cache");
-        self.content_mut().load_consolidate_package(package)
-    }
+    //     log::trace!("Loading package into patching cache");
+    //     self.content_mut().clean_load_patching_table(package)
+    // }
 
     pub fn from_iter<'a>(
         iter: impl Iterator<Item = &'a PatchingCacheEntry>,
@@ -616,16 +635,32 @@ impl PatchingCache {
                 .context("Can not replace cache content with content from a larger cache.")?
         }
 
-        // Copy the other content into our content buffer. We checked that
-        // the other content is <= our content, thus this is safe.
-        let dst = self.content_slice_mut();
-        let src = other.content_slice();
-        dst[..src.len()].copy_from_slice(src);
+        // Copy the element (both the entries and the operations) from the other cache
+        // into our content space.
+        self.content_mut().clear();
+        for entry_idx in other.content().iter() {
+            let entry = other.content().entry_ref(entry_idx);
+            let new_entry = entry.clone();
+            let idx= self.content_mut().push(new_entry)?;
+            let ops = other.content().ops(entry_idx);
+            if ops.len() > 0 {
+                self.content_mut().push_op_batch(idx, &ops)?;
+            }
+        }
 
-        // The copied content might stream from a cache that was smaller than us,
-        // hence we need to inform the MutationCacheContent that its backing memory
-        // size might have changed.
-        // let content_size = self.content_size;
+        // let dst = self.content_slice_mut();
+        // let src = other.content_slice();
+        // dst[..src.len()].copy_from_slice(src);
+
+        // // Copy the other content into our content buffer. We checked that
+        // // the other content is <= our content, thus this is safe.
+        // let dst = self.content_slice_mut();
+        // let src = other.content_slice();
+        // dst[..src.len()].copy_from_slice(src);
+
+        // // The copied content might stream from a cache that was smaller than us,
+        // // hence we need to inform the MutationCacheContent that its backing memory
+        // // size might have changed.
         // self.content_mut().update(content_size);
 
         Ok(())
@@ -658,45 +693,6 @@ impl PatchingCache {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PatchingCacheEntry> {
         PatchingCacheIterMut::new(self)
-    }
-
-    pub fn apply_patching_table(&mut self, patching_table: &PatchingTable) {
-        self.clear();
-
-        for (pp, ops) in patching_table.tbl.iter() {
-            let entry = PatchingCacheEntry::from(pp);
-            let entry_idx = self
-                .content_mut()
-                .push(entry)
-                .expect("Failed to push entry");
-            let mut head_op_idx = None;
-
-            for op in ops {
-                match op.op {
-                    PatchingOperator::Jmp => {
-                        self.content_mut()
-                            .entry_mut(entry_idx)
-                            .set_flag(PatchingCacheEntryFlags::Jumping);
-                    }
-                    _ => {
-                        self.content_mut()
-                            .entry_mut(entry_idx)
-                            .set_flag(PatchingCacheEntryFlags::Patching);
-                    }
-                }
-                let op_idx = self
-                    .content_mut()
-                    .push_op(entry_idx, op)
-                    .expect("Failed to push op");
-                if head_op_idx.is_none() {
-                    head_op_idx = Some(op_idx);
-                }
-            }
-
-            self.content().entry_mut(entry_idx).metadata.op_idx = head_op_idx;
-        }
-
-        println!("entries: {:?}", self.content().entries());
     }
 
     /**
@@ -759,7 +755,7 @@ impl PatchingCache {
                     _ => {}
                 }
             } else {
-                let idx = self.content_mut().push(other_entry.clone())?;
+                let idx = self.content_mut().push(other_entry.clone()).expect("Failed to push entry");
                 self.content_mut().entry_mut(idx).set_flag(flag);
                 match flag {
                     PatchingCacheEntryFlags::Patching | PatchingCacheEntryFlags::Jumping => {
@@ -850,32 +846,6 @@ impl PatchingCache {
 
     fn resize_covered_entries_wo_msk(&mut self, trace: &Trace) -> &mut Self {
         self
-    }
-}
-
-pub struct PatchingTable {
-    tbl: HashMap<PatchPoint, Vec<PatchingOperation>>,
-}
-
-impl PatchingTable {
-    pub fn new() -> Self {
-        Self {
-            tbl: HashMap::new(),
-        }
-    }
-
-    pub fn add_patching(&mut self, id: PatchPoint, op: PatchingOperation) {
-        self.tbl.entry(id).or_insert(vec![]).push(op);
-    }
-
-    pub fn sync_patching_cache(&self, patching_cache: &mut PatchingCache) {
-        // let mut entries:Vec<&PatchingCacheEntry> = patching_cache
-        //     .entries()
-        //     .into_iter()
-        //     .filter(|e| !e.is_flag_set(PatchingCacheEntryFlags::Patching))
-        //     .collect();
-        // let mut new_cache = PatchingCache::new().unwrap();
-        // let patching_cache =
     }
 }
 
@@ -1054,5 +1024,13 @@ mod test {
                 true,
             );
         }
+    }
+
+    fn test_estimate_memory_occupied() {
+        let entry_size = 10000;
+        let op_size = 10000;
+        let expected_size = PatchingCacheContent::estimate_memory_occupied(entry_size, op_size);
+        let actual_size = PatchingCacheContent::estimate_memory_occupied(entry_size, op_size);
+        assert_eq!(expected_size, actual_size);
     }
 }
