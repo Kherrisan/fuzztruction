@@ -578,15 +578,6 @@ impl PatchingCacheContent {
         Ok((free_idx, op_mut))
     }
 
-    pub fn clear_ops(&mut self, idx: usize) -> Result<()> {
-        let mut op_idx = self.entry_ref(idx).op_head_idx;
-        while let Some(idx) = op_idx {
-            self.op_bitmap.clear_at(idx)?;
-            op_idx = self.op_ref(idx).next_idx;
-        }
-        Ok(())
-    }
-
     pub fn reset_all_entry_op(&mut self) {
         self.entry_bitmap.iter().for_each(|idx| {
             let entry = self.entry_mut(idx);
@@ -801,7 +792,7 @@ impl PatchingCacheContent {
         return Ok(());
     }
 
-    fn remove_entry_ops(&mut self, idx: usize) -> Result<()> {
+    pub fn clear_entry_ops(&mut self, idx: usize) -> Result<()> {
         let entry = self.entry_mut(idx);
         let mut op_idx = entry.op_head_idx;
         while let Some(idx) = op_idx {
@@ -811,11 +802,14 @@ impl PatchingCacheContent {
         let entry = self.entry_mut(idx);
         entry.op_head_idx = None;
         entry.op_tail_idx = None;
+
         Ok(())
     }
 
-    fn remove_entry_idx(&mut self, idx: usize) -> Result<()> {
+    pub fn remove_entry_idx(&mut self, idx: usize) -> Result<()> {
+        self.clear_entry_ops(idx)?;
         self.entry_bitmap.clear_at(idx)?;
+
         Ok(())
     }
 
@@ -838,7 +832,7 @@ impl PatchingCacheContent {
 
         let (idx, _) = res.unwrap();
 
-        self.remove_entry_ops(idx)?;
+        self.clear_entry_ops(idx)?;
         self.remove_entry_idx(idx)?;
 
         Ok(idx)

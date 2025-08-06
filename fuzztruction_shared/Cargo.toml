@@ -28,8 +28,8 @@ proc-maps = { path = "../lib/proc-maps" }
 ipmpsc = "~0"
 ansi_term = "0.12"
 chrono = "~0"
-# libafl = { version = "~0.15", features = ["prometheus_monitor"] }
-# libafl_bolts = "~0.15"
+libafl = { version = "~0.15", features = ["prometheus_monitor"] }
+libafl_bolts = "~0.15"
 elf = "0.7.4"
 bincode = "~1"
 derive_more = { version = "~2", features = ["display"] }

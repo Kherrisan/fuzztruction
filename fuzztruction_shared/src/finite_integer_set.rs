@@ -8,7 +8,7 @@ use std::{
 use crate::{constants::MAX_PATCHPOINT_CNT, types::PatchPointID};
 use rand::{
     prelude::{IteratorRandom, SliceRandom},
-    thread_rng,
+    thread_rng, Rng,
 };
 use serde::{Deserialize, Serialize};
 
@@ -118,13 +118,31 @@ where
         res
     }
 
-    pub fn choose_random(&self, max: usize) -> FiniteIntegerSet<U, N> {
-        let mut entries: Vec<_> = self
-            .entries()
-            .into_iter()
-            .choose_multiple(&mut thread_rng(), max);
-        entries.shuffle(&mut thread_rng());
-        entries.into_iter().collect()
+    pub fn choose_random<R: libafl_bolts::rands::Rand>(
+        &self,
+        max: usize,
+        rand: &mut R,
+    ) -> HashSet<U> {
+        // 使用 libafl_bolts::rands::Rand 实现从集合中随机选择不超过 max 个元素
+        // 1. 收集所有元素
+        let mut entries: Vec<U> = self.entries().into_iter().collect();
+        let total = entries.len();
+
+        // 2. 如果元素数量小于等于 max，直接返回所有元素
+        if total <= max {
+            return entries.into_iter().collect();
+        }
+
+        // 3. 否则，使用 libafl_bolts 的 Rand trait 随机选择 max 个元素
+        // 采用 Fisher-Yates 洗牌算法的前 max 步，避免依赖 rand crate
+        for i in 0..max {
+            // 在 [i, total) 区间内随机选择一个索引
+            let j = i + rand.below_or_zero(total - i);
+            entries.swap(i, j);
+        }
+
+        // 4. 收集前 max 个元素为新的集合
+        entries.into_iter().take(max).collect()
     }
 
     /// Get a subset with a maximum size of `n`.

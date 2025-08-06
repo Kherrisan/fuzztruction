@@ -46,11 +46,19 @@ pub const PATCHING_OPERATORS: [PatchingOperator; 12] = [
 ];
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash)]
 pub struct PatchingOperation {
     pub op: PatchingOperator,
     pub operand: u64,
     pub next_idx: Option<usize>,
+}
+
+impl Eq for PatchingOperation {}
+
+impl PartialEq for PatchingOperation {
+    fn eq(&self, other: &Self) -> bool {
+        self.op == other.op && self.operand == other.operand
+    }
 }
 
 impl PatchingOperation {
@@ -65,6 +73,14 @@ impl PatchingOperation {
 
 #[repr(C)]
 #[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum PatchingCacheEntryDirty {
+    Nop = 0,
+    Dirty = 1,
+    Clear = 2,
+}
+
+#[repr(C)]
+#[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct PatchingCacheEntryMetadata {
     /// A unique ID used to map mutation entries onto PatchPoint instances.
     /// We need this field, since the `vma` might differ between multiple
@@ -73,6 +89,8 @@ pub struct PatchingCacheEntryMetadata {
 
     vma: u64,
     flags: u8,
+
+    dirty: PatchingCacheEntryDirty,
 
     pub loc_type: llvm_stackmap::LocationType,
     pub loc_size: u16,
@@ -153,6 +171,7 @@ impl PatchingCacheEntry {
             id,
             vma,
             flags,
+            dirty: PatchingCacheEntryDirty::Nop,
             loc_type,
             loc_size,
             dwarf_regnum,
@@ -339,6 +358,18 @@ impl PatchingCacheEntry {
 
     pub fn is_nop(&self) -> bool {
         self.op_head_idx.is_none()
+    }
+
+    pub fn set_dirty(&mut self, dirty: PatchingCacheEntryDirty) {
+        self.metadata.dirty = dirty;
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.metadata.dirty == PatchingCacheEntryDirty::Dirty
+    }
+
+    pub fn is_clear(&self) -> bool {
+        self.metadata.dirty == PatchingCacheEntryDirty::Clear
     }
 }
 

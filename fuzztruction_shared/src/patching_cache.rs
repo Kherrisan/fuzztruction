@@ -19,7 +19,9 @@ use thiserror::Error;
 use crate::{
     constants::ENV_SHM_NAME,
     patching_cache_content::{BitmapIter, PatchingCacheContent},
-    patching_cache_entry::{PatchingCacheEntry, PatchingOperation, PatchingOperator},
+    patching_cache_entry::{
+        PatchingCacheEntry, PatchingCacheEntryDirty, PatchingOperation, PatchingOperator,
+    },
     patchpoint::PatchPoint,
     tracing::Trace,
     types::PatchPointID,
@@ -560,9 +562,15 @@ impl PatchingCache {
 
 /// Methods that are working on the actual cache content.
 impl PatchingCache {
-    pub fn push(&mut self, entry: PatchingCacheEntry) -> Result<()> {
+    pub fn push(&mut self, entry: PatchingCacheEntry, ops: Vec<PatchingOperation>) -> Result<()> {
+        let mut entry = entry;
+        entry.set_dirty(PatchingCacheEntryDirty::Dirty);
         self.content_mut().push(entry.clone()).and_then(|idx| {
-            // self.b_tree.insert(entry.id(), idx);
+            if ops.len() > 0 {
+                self.content_mut().push_op_batch(idx, &ops)?;
+            }
+            self.b_tree.insert(entry.id(), idx);
+
             Ok(())
         })
     }
@@ -571,7 +579,7 @@ impl PatchingCache {
     /// !!! This will invalidate all references to the cached entries !!!
     pub fn remove(&mut self, id: PatchPointID) -> Result<()> {
         self.content_mut().remove(id).and_then(|_| {
-            // self.b_tree.remove(&id);
+            self.b_tree.remove(&id);
             Ok(())
         })
     }
@@ -593,37 +601,13 @@ impl PatchingCache {
         self.content().entry_count()
     }
 
-    // pub fn load_package(&mut self, package: &PatchingCacheContentPackage) -> Result<()> {
-    //     // self.content_slice_mut()[..bytes.len()].copy_from_slice(bytes);
-    //     // unsafe {
-    //     //     // Update the size since we might loaded the content from a differently
-    //     //     // sized cache.
-    //     //     (&mut *(self.content.0 as *mut MutationCacheContent)).update(self.content_size);
-    //     // }
-
-    //     log::trace!("Loading package into patching cache");
-    //     self.content_mut().clean_load_patching_table(package)
-    // }
-
-    pub fn from_iter<'a>(
-        iter: impl Iterator<Item = &'a PatchingCacheEntry>,
-    ) -> Result<PatchingCache> {
-        let mut ret = Self::default();
-
-        for elem in iter {
-            ret.push(elem.clone())?;
-        }
-
-        Ok(ret)
-    }
-
     pub fn from_patchpoints(patchpoints: &[PatchPoint]) -> Result<PatchingCache> {
         let entry_size = patchpoints.len();
         let mut ret = Self::new(entry_size, entry_size)?;
 
         for pp in patchpoints {
             let e = PatchingCacheEntry::from(pp);
-            ret.push(e)?;
+            ret.push(e, vec![])?;
         }
 
         Ok(ret)
@@ -637,14 +621,32 @@ impl PatchingCache {
 
         // Copy the element (both the entries and the operations) from the other cache
         // into our content space.
-        self.content_mut().clear();
+        // self.content_mut().clear();
+        for entry in self.entries_mut() {
+            entry.set_dirty(PatchingCacheEntryDirty::Clear);
+        }
+
         for entry_idx in other.content().iter() {
-            let entry = other.content().entry_ref(entry_idx);
-            let new_entry = entry.clone();
-            let idx= self.content_mut().push(new_entry)?;
-            let ops = other.content().ops(entry_idx);
-            if ops.len() > 0 {
-                self.content_mut().push_op_batch(idx, &ops)?;
+            let new_entry = other.content().entry_ref(entry_idx);
+
+            if let Some(&current_idx) = self.b_tree.get(&new_entry.id()) {
+                let current_entry = self.content().entry_mut(current_idx);
+
+                if current_entry.flags() != new_entry.flags() {
+                    current_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                    current_entry.set_flags(new_entry.flags());
+                }
+
+                let ops = other.content().ops(entry_idx);
+                let current_ops = self.content().ops(current_idx);
+                if current_ops != ops {
+                    current_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                    self.content_mut().clear_entry_ops(current_idx)?;
+                    self.content_mut().push_op_batch(current_idx, &ops)?;
+                }
+            } else {
+                let ops = other.content().ops(entry_idx);
+                self.push(new_entry.clone(), ops)?;
             }
         }
 
@@ -664,12 +666,6 @@ impl PatchingCache {
         // self.content_mut().update(content_size);
 
         Ok(())
-    }
-
-    /// Removes all elements from the cache that are not listed in the passed
-    /// whitelist.
-    fn retain_whitelisted(&mut self, whitelist: &[PatchPointID]) {
-        self.content_mut().retain(|e| whitelist.contains(&e.id()));
     }
 
     /// Only retain elements for which `f` returns true.
@@ -704,16 +700,10 @@ impl PatchingCache {
      * the entries in the other (new) cache will be kept.
      */
     pub fn union(&mut self, other: &PatchingCache) -> Result<()> {
-        let mut bm_idx_map = HashMap::new();
-        self.content().iter().for_each(|idx| {
-            let e = self.content().entry_ref(idx);
-            bm_idx_map.insert(e.id(), idx);
-        });
-
-        self.union_with_flag(other, PatchingCacheEntryFlags::Tracing, &bm_idx_map)?;
-        self.union_with_flag(other, PatchingCacheEntryFlags::TracingWithVal, &bm_idx_map)?;
-        self.union_with_flag(other, PatchingCacheEntryFlags::Patching, &bm_idx_map)?;
-        self.union_with_flag(other, PatchingCacheEntryFlags::Jumping, &bm_idx_map)?;
+        self.union_with_flag(other, PatchingCacheEntryFlags::Tracing)?;
+        self.union_with_flag(other, PatchingCacheEntryFlags::TracingWithVal)?;
+        self.union_with_flag(other, PatchingCacheEntryFlags::Patching)?;
+        self.union_with_flag(other, PatchingCacheEntryFlags::Jumping)?;
 
         Ok(())
     }
@@ -722,7 +712,6 @@ impl PatchingCache {
         &mut self,
         other: &PatchingCache,
         flag: PatchingCacheEntryFlags,
-        bm_idx_map: &HashMap<PatchPointID, usize>,
     ) -> Result<()> {
         log::trace!("Unioning with flag: {:?}", flag);
         for other_idx in other.content().iter() {
@@ -731,10 +720,14 @@ impl PatchingCache {
                 continue;
             }
             let pp_id = other_entry.id();
-            if let Some(idx) = bm_idx_map.get(&pp_id) {
-                self.content_mut().entry_mut(*idx).set_flag(flag);
+            if let Some(&idx) = self.b_tree.get(&pp_id) {
+                let entry = self.content().entry_mut(idx);
 
-                let entry = self.content().entry_ref(*idx);
+                if !entry.is_flag_set(flag) {
+                    entry.set_flag(flag);
+                    entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                }
+
                 if entry.is_flag_set(PatchingCacheEntryFlags::Patching)
                     && entry.is_flag_set(PatchingCacheEntryFlags::Jumping)
                 {
@@ -747,23 +740,19 @@ impl PatchingCache {
                 match flag {
                     PatchingCacheEntryFlags::Patching | PatchingCacheEntryFlags::Jumping => {
                         let other_ops = other.content().ops(other_idx);
-                        self.content_mut().clear_ops(*idx).unwrap();
-                        let head_op_idx =
-                            self.content_mut().push_op_batch(*idx, &other_ops).unwrap();
-                        self.content_mut().entry_mut(*idx).metadata.op_idx = head_op_idx;
+                        let ops = self.content().ops(idx);
+
+                        if ops != other_ops {
+                            entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                            self.content_mut().clear_entry_ops(idx)?;
+                            self.content_mut().push_op_batch(idx, &other_ops)?;
+                        }
                     }
                     _ => {}
                 }
             } else {
-                let idx = self.content_mut().push(other_entry.clone()).expect("Failed to push entry");
-                self.content_mut().entry_mut(idx).set_flag(flag);
-                match flag {
-                    PatchingCacheEntryFlags::Patching | PatchingCacheEntryFlags::Jumping => {
-                        let ops = other.content().ops(other_idx);
-                        self.content_mut().push_op_batch(idx, &ops)?;
-                    }
-                    _ => {}
-                }
+                let ops = other.content().ops(other_idx);
+                self.push(other_entry.clone(), ops)?;
             }
         }
 
@@ -831,6 +820,11 @@ impl PatchingCache {
         self.remove_by_location_type(LocationType::Constant);
         self
     }
+
+    pub fn remove_cleared_entries(&mut self) -> &mut Self {
+        self.retain(|e| !e.is_clear());
+        self
+    }
 }
 
 impl PatchingCache {
@@ -850,18 +844,9 @@ impl PatchingCache {
 }
 
 mod test {
-    use std::{ffi::CString, mem::transmute, ptr};
-
-    use libc::c_void;
     use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
-    use crate::{
-        patching_cache::{PATCHING_CACHE_DEFAULT_ENTRY_SIZE, PATCHING_CACHE_DEFAULT_OP_SIZE},
-        patching_cache_content::PatchingCacheContent,
-        patching_cache_entry::PatchingCacheEntry,
-    };
-
-    use super::PatchingCache;
+    use crate::patching_cache_entry::PatchingCacheEntry;
 
     fn generate_random_string(length: usize) -> String {
         let rng = thread_rng();
@@ -890,7 +875,7 @@ mod test {
     fn patching_cache_replace() {
         let mut cache = PatchingCache::default();
         for i in 0..100 {
-            cache.push(dummy_entry(i as u64)).unwrap();
+            cache.push(dummy_entry(i as u64), vec![]).unwrap();
         }
 
         let mut other = PatchingCache::new(100, 100).unwrap();
@@ -956,7 +941,7 @@ mod test {
         println!("  Entry data offset: {}", content1.entry_data_offset());
         println!("  Op data offset: {}", content1.op_data_offset());
 
-        cache1.push(dummy_entry(101)).unwrap();
+        cache1.push(dummy_entry(101), vec![]).unwrap();
 
         assert_eq!(cache1.len(), 1);
         assert_eq!(cache1.len(), cache2.len());
@@ -1026,6 +1011,7 @@ mod test {
         }
     }
 
+    #[test]
     fn test_estimate_memory_occupied() {
         let entry_size = 10000;
         let op_size = 10000;

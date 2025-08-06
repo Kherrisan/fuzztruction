@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local};
+use libafl_bolts::rands::Rand;
 use log::log_enabled;
 use nix::sys::signal::Signal;
 use serde::Serialize;
@@ -160,7 +161,11 @@ pub fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<
 }
 
 pub fn dump_json<T: serde::Serialize>(path: &Path, data: &T) -> anyhow::Result<()> {
-    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
     let buf = serde_json::to_vec(data)?;
     file.write_all(&buf)?;
     Ok(())
@@ -208,6 +213,14 @@ pub fn get_file_version(path: &PathBuf) -> anyhow::Result<DateTime<Local>> {
     let metadata = fs::metadata(path)?;
     let modified_time = metadata.modified()?;
     Ok(DateTime::<Local>::from(modified_time))
+}
+
+pub fn shuffle<T, R: Rand>(slice: &mut [T], rng: &mut R) {
+    let len = slice.len();
+    for i in (1..len).rev() {
+        let j = rng.below_or_zero(i + 1);
+        slice.swap(i, j);
+    }
 }
 
 #[cfg(test)]
