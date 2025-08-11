@@ -1,16 +1,20 @@
+use chrono::{DateTime, Local};
+use libafl_bolts::rands::Rand;
 use log::log_enabled;
 use nix::sys::signal::Signal;
+use serde::Serialize;
 use std::{
     alloc,
     convert::TryInto,
-    fs::{self, read_link},
-    path::PathBuf,
+    fs::{self, read_link, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub trait ExpectNone {
@@ -145,6 +149,77 @@ pub fn print_fds() {
                 eprintln!("Error reading link for {:?}: {}", fd_path, e);
             }
         }
+    }
+}
+
+pub fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let res = serde_json::from_slice(&buf)?;
+    Ok(res)
+}
+
+pub fn dump_json<T: serde::Serialize>(path: &Path, data: &T) -> anyhow::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    let buf = serde_json::to_vec(data)?;
+    file.write_all(&buf)?;
+    Ok(())
+}
+
+pub fn load_bin<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+
+    let start = Instant::now();
+    let res = bincode::deserialize(&buf)?;
+    let duration = start.elapsed();
+
+    log::info!(
+        "Loaded {} bytes from {:?} in {:?}",
+        buf.len(),
+        path,
+        duration
+    );
+
+    Ok(res)
+}
+
+pub fn dump_bin<T: Serialize>(path: &Path, data: &T) -> anyhow::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+
+    let start = Instant::now();
+    let buf = bincode::serialize(data)?;
+    let duration = start.elapsed();
+
+    file.write_all(&buf)?;
+
+    log::info!("Dumped {} bytes to {:?} in {:?}", buf.len(), path, duration);
+
+    Ok(())
+}
+
+pub fn get_file_version(path: &PathBuf) -> anyhow::Result<DateTime<Local>> {
+    let metadata = fs::metadata(path)?;
+    let modified_time = metadata.modified()?;
+    Ok(DateTime::<Local>::from(modified_time))
+}
+
+pub fn shuffle<T, R: Rand>(slice: &mut [T], rng: &mut R) {
+    let len = slice.len();
+    for i in (1..len).rev() {
+        let j = rng.below_or_zero(i + 1);
+        slice.swap(i, j);
     }
 }
 

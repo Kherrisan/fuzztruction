@@ -47,7 +47,10 @@ impl CommunicationChannel {
 
         for e in [&mq_send, &mq_recv].iter() {
             match e {
-                Err(_) => return Err(CommunicationChannelError::FailedToOpenMessageQueues),
+                Err(e) => {
+                    println!("Error opening message queue: {:?}", e);
+                    return Err(CommunicationChannelError::FailedToOpenMessageQueues);
+                }
                 _ => (),
             };
         }

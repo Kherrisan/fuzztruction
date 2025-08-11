@@ -1,9 +1,4 @@
-use std::{env, ffi::CString, ptr, slice};
-
-use libafl_bolts::{
-    rands::{Rand, RandomSeed, StdRand},
-    AsMutSlice, AsSlice,
-};
+use std::{env, ffi::CString, ops::{Deref, DerefMut}, ptr, slice};
 use libc::{c_int, munmap, shm_unlink};
 
 use anyhow::{anyhow, Context, Result};
@@ -41,7 +36,7 @@ impl MmapShMem {
         let mut size = size;
 
         log::debug!(
-            "shm_ (name={:#?}, create={create}, size={size:x} ({size_kb}))",
+            "shm_ (name={:#?}, create={create}, size={size:x} ({size_kb} KB))",
             path,
             size_kb = size / 1024
         );
@@ -99,6 +94,24 @@ impl MmapShMem {
         }
     }
 
+    pub fn as_ptr_of<T: Sized>(&self) -> Option<*const T> {
+        if self.len() >= size_of::<T>() {
+            Some(self.as_ptr() as *const T)
+        } else {
+            None
+        }
+    }
+
+    /// Convert to a mut ptr of a given type, checking the size.
+    /// If the map is too small, returns `None`
+    pub fn as_mut_ptr_of<T: Sized>(&mut self) -> Option<*mut T> {
+        if self.len() >= size_of::<T>() {
+            Some(self.as_mut_ptr() as *mut T)
+        } else {
+            None
+        }
+    }
+
     pub fn write_to_env(&self, name: &str) -> Result<()> {
         env::set_var(format!("PINGU_SHM_{}_PATH", name), self.path.to_owned());
         env::set_var(
@@ -153,32 +166,22 @@ impl MmapShMem {
     pub fn size(&self) -> usize {
         self.map_size
     }
-
-    pub unsafe fn as_object<T: Sized + 'static>(&self) -> &T {
-        assert!(self.size() >= core::mem::size_of::<T>());
-        (self.as_slice().as_ptr() as *const () as *const T)
-            .as_ref()
-            .unwrap()
-    }
-
-    pub unsafe fn as_object_mut<T: Sized + 'static>(&mut self) -> &mut T {
-        assert!(self.size() >= core::mem::size_of::<T>());
-        (self.as_mut_slice().as_mut_ptr() as *mut () as *mut T)
-            .as_mut()
-            .unwrap()
-    }
 }
 
-impl AsSlice for MmapShMem {
-    type Entry = u8;
-    fn as_slice(&self) -> &[u8] {
+impl Deref for MmapShMem {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // # Safety
+        // No user-provided potentially unsafe parameters.
         unsafe { slice::from_raw_parts(self.map, self.map_size) }
     }
 }
 
-impl AsMutSlice for MmapShMem {
-    type Entry = u8;
-    fn as_mut_slice(&mut self) -> &mut [u8] {
+impl DerefMut for MmapShMem {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // # Safety
+        // No user-provided potentially unsafe parameters.
         unsafe { slice::from_raw_parts_mut(self.map, self.map_size) }
     }
 }

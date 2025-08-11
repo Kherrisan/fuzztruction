@@ -1,8 +1,6 @@
 #![allow(clippy::all)]
-#![feature(new_uninit)]
 #![feature(assert_matches)]
 #![feature(slice_as_chunks)]
-#![feature(exclusive_range_pattern)]
 #![feature(linked_list_cursors)]
 #![feature(linked_list_remove)]
 
@@ -12,9 +10,9 @@ pub mod communication_channel;
 pub mod dwarf;
 pub mod messages;
 //pub mod mutation_cache;
-pub mod mutation_cache;
-pub mod mutation_cache_content;
-pub mod mutation_cache_entry;
+pub mod patching_cache;
+pub mod patching_cache_content;
+pub mod patching_cache_entry;
 pub mod types;
 pub mod util;
 
@@ -32,3 +30,7 @@ pub mod shared_memory;
 pub mod serializer;
 pub mod finite_integer_set;
 pub mod patchpoint;
+pub mod var;
+pub mod func;
+pub mod func_block_addr;
+pub mod func_addr;

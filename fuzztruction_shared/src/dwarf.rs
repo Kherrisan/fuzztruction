@@ -1,4 +1,4 @@
-use core::panic;
+use anyhow::Result;
 use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,7 @@ use strum_macros::AsRefStr;
     PartialOrd,
     Ord,
     TryFromPrimitive,
+    Hash,
 )]
 pub enum DwarfReg {
     Rax = 0,
@@ -141,11 +142,17 @@ impl Default for DwarfReg {
 macro_rules! reg0 {
     ($size:ident, $infix:literal) => {
         match $size {
-            1 => return Some(format!("{}l", $infix)),
-            2 => return Some(format!("{}x", $infix)),
-            4 => return Some(format!("e{}x", $infix)),
-            8 => return Some(format!("r{}x", $infix)),
-            _ => panic!("Invalid size {:?} for infix {:?}", $size, $infix),
+            1 => return Ok(format!("{}l", $infix)),
+            2 => return Ok(format!("{}x", $infix)),
+            4 => return Ok(format!("e{}x", $infix)),
+            8 => return Ok(format!("r{}x", $infix)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid size {:?} for infix {:?}",
+                    $size,
+                    $infix
+                ))
+            }
         }
     };
 }
@@ -153,11 +160,17 @@ macro_rules! reg0 {
 macro_rules! reg1 {
     ($size:ident, $infix:literal) => {
         match $size {
-            1 => return Some(format!("{}il", $infix)),
-            2 => return Some(format!("{}i", $infix)),
-            4 => return Some(format!("e{}i", $infix)),
-            8 => return Some(format!("r{}i", $infix)),
-            _ => panic!("Invalid size {} for infix {}", $size, $infix),
+            1 => return Ok(format!("{}il", $infix)),
+            2 => return Ok(format!("{}i", $infix)),
+            4 => return Ok(format!("e{}i", $infix)),
+            8 => return Ok(format!("r{}i", $infix)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid size {:?} for infix {:?}",
+                    $size,
+                    $infix
+                ))
+            }
         }
     };
 }
@@ -165,11 +178,17 @@ macro_rules! reg1 {
 macro_rules! reg2 {
     ($size:ident, $infix:literal) => {
         match $size {
-            1 => return Some(format!("{}pl", $infix)),
-            2 => return Some(format!("{}p", $infix)),
-            4 => return Some(format!("e{}p", $infix)),
-            8 => return Some(format!("r{}p", $infix)),
-            _ => panic!("Invalid size {} for infix {}", $size, $infix),
+            1 => return Ok(format!("{}pl", $infix)),
+            2 => return Ok(format!("{}p", $infix)),
+            4 => return Ok(format!("e{}p", $infix)),
+            8 => return Ok(format!("r{}p", $infix)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid size {:?} for infix {:?}",
+                    $size,
+                    $infix
+                ))
+            }
         }
     };
 }
@@ -177,11 +196,17 @@ macro_rules! reg2 {
 macro_rules! reg3 {
     ($size:ident, $infix:literal) => {
         match $size {
-            1 => return Some(format!("r{}b", $infix)),
-            2 => return Some(format!("r{}w", $infix)),
-            4 => return Some(format!("r{}d", $infix)),
-            8 => return Some(format!("r{}", $infix)),
-            _ => panic!("Invalid size {} for infix {}", $size, $infix),
+            1 => return Ok(format!("r{}b", $infix)),
+            2 => return Ok(format!("r{}w", $infix)),
+            4 => return Ok(format!("r{}d", $infix)),
+            8 => return Ok(format!("r{}", $infix)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid size {:?} for infix {:?}",
+                    $size,
+                    $infix
+                ))
+            }
         }
     };
 }
@@ -192,7 +217,7 @@ impl DwarfReg {
         s.to_lowercase()
     }
 
-    pub fn name_with_size(&self, size: u8) -> Option<String> {
+    pub fn name_with_size(&self, size: u8) -> Result<String> {
         // FIXME: We could return &'static str here if we use macros
         // in the macros above to construct strings with static lifetime.
 
@@ -201,14 +226,14 @@ impl DwarfReg {
 
         match *self as u16 {
             reg @ XMM0_ID..XMM15_ID => match size {
-                16 => return Some(format!("xmm{}", reg - XMM0_ID)),
-                _ => panic!("Invalid size {} for xmm", size),
+                16 => return Ok(format!("xmm{}", reg - XMM0_ID)),
+                _ => return Err(anyhow::anyhow!("Invalid size {} for xmm", size)),
             },
             _ => (), // fallthrough
         }
 
         if size != 1 && size != 2 && size != 4 && size != 8 {
-            return None;
+            return Err(anyhow::anyhow!("Invalid size {} for dwarf reg", size));
         }
 
         match self {
@@ -264,7 +289,7 @@ impl DwarfReg {
                 reg3!(size, "15");
             }
             // Unsupported reg.
-            _ => return None,
+            _ => return Err(anyhow::anyhow!("Unsupported reg {:?}", self)),
         }
     }
 }

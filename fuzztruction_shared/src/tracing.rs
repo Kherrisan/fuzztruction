@@ -5,11 +5,13 @@ use std::{
     cell::UnsafeCell,
     collections::{HashMap, HashSet},
     ffi::CString,
-    io,
+    fmt::{self, Display},
+    fs::File,
+    io::{self, Write},
     mem::size_of,
 };
 
-use crate::constants::ENV_FT_SET_SHM;
+use crate::{constants::ENV_FT_SET_SHM, types::PatchPointID};
 
 use super::shared_memory::MmapShMem;
 
@@ -63,6 +65,35 @@ impl std::fmt::Debug for TraceVector {
 }
 
 impl TraceVector {
+    pub fn dump(&self, path: &str, bytes: usize) -> Result<()> {
+        assert!(bytes <= self.memory_capacity());
+        assert!(bytes >= size_of::<TraceVectorHeader>());
+
+        let mut file = File::create(path)?;
+        let mut buffer = vec![0; bytes];
+        // First dump the header
+        let header_slice = unsafe {
+            std::slice::from_raw_parts(
+                self.header as *const u8,
+                std::mem::size_of::<TraceVectorHeader>(),
+            )
+        };
+        file.write_all(header_slice)?;
+
+        let mut offset = size_of::<TraceVectorHeader>();
+        // Then dump the remaining bytes
+        while offset < bytes {
+            let read_size = std::cmp::min(buffer.len(), bytes - offset);
+            let slice = unsafe {
+                std::slice::from_raw_parts((self.header as *const u8).add(offset), read_size)
+            };
+            buffer[..read_size].copy_from_slice(slice);
+            file.write_all(&buffer[..read_size])?;
+            offset += read_size;
+        }
+        Ok(())
+    }
+
     pub fn frequent_set(&self, threshold: usize) -> Vec<u32> {
         let mut trace_cnt = self.hit_counts();
         trace_cnt.retain(|_, cnt| *cnt as usize > threshold);
@@ -70,7 +101,7 @@ impl TraceVector {
     }
 
     pub fn memory_ratio(&self) -> f64 {
-        (self.len() * size_of::<TraceEntry>() + size_of::<TraceVectorHeader>()) as f64
+        (self.len() * size_of::<TraceVectorEntry>() + size_of::<TraceVectorHeader>()) as f64
             / self.memory_capacity() as f64
     }
 
@@ -99,10 +130,11 @@ impl TraceVector {
     }
 
     pub fn new(len: usize, tag: &str) -> Result<TraceVector> {
-        let total_size = size_of::<TraceVectorHeader>() + len * size_of::<TraceEntry>();
+        log::trace!("Creating trace vector with length: {}, tag: {}", len, tag);
+        let total_size = size_of::<TraceVectorHeader>() + len * size_of::<TraceVectorEntry>();
         let label = format!("trace_{}", tag);
         let mut shared_memory = MmapShMem::new_shmem(total_size, &label)?;
-        let header = TraceVectorHeader::new(true, len, &mut shared_memory)?;
+        let header = TraceVectorHeader::new(true, total_size, &mut shared_memory)?;
 
         let env_key = format!("{}_{}", ENV_FT_TRACE_SHM, tag.to_uppercase());
         shared_memory.write_to_env(&env_key)?;
@@ -123,7 +155,8 @@ impl TraceVector {
                 return Err(anyhow!(err).context(format!("When getting trace shm: {}", env_key)));
             }
         };
-        let len = (shared_memory.size() - size_of::<TraceVectorHeader>()) / size_of::<TraceEntry>();
+        let len =
+            (shared_memory.size() - size_of::<TraceVectorHeader>()) / size_of::<TraceVectorEntry>();
         let header = TraceVectorHeader::new(false, len, &mut shared_memory)?;
 
         Ok(TraceVector {
@@ -132,61 +165,114 @@ impl TraceVector {
         })
     }
 
-    pub fn first(&self) -> Option<&TraceEntry> {
+    pub fn first(&self) -> Option<&TraceVectorEntry> {
         self.entry(0)
     }
 
-    pub fn last(&self) -> Option<&TraceEntry> {
+    pub fn last(&self) -> Option<&TraceVectorEntry> {
         if self.len() == 0 {
             return None;
         }
         self.entry(self.len() - 1)
     }
 
-    pub fn hit(&mut self, id: u32, value: u64) {
-        if self.len() >= self.capacity() {
-            println!("TraceVector is full of capacity: {}", self.capacity());
+    pub fn hit_value<T>(&mut self, id: u32, value: T) {
+        if id == 53342 {
+            println!("a");
+        }
+
+        let value_bytes = unsafe {
+            std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
+        };
+        if id == 53342 {
+            println!("b");
+        }
+
+        self.hit_slice(id, value_bytes);
+        
+        if id == 53342 {
+            println!("c");
+        }
+    }
+
+    pub fn hit_slice(&mut self, id: u32, value: &[u8]) {
+        let align = std::mem::align_of::<TraceVectorEntry>();
+        let base_ptr = unsafe { self.data_mut_ptr().add(self.header().offset) };
+        let alignment_offset = base_ptr.align_offset(align) as usize;
+
+        if alignment_offset == usize::MAX {
+            // 无法对齐，需要处理这种情况
+            println!("Cannot align pointer");
+            panic!("Cannot align pointer");
+        }
+
+        let entry_size = size_of::<TraceVectorEntry>() + value.len();
+        let total_size = alignment_offset + entry_size;
+
+        if self.header().offset + total_size > self.memory_capacity() {
+            println!("TraceVector is full of capacity after pushing this item: ");
+            println!("current offset: {}", self.header().offset);
+            println!("entry total size: {}", total_size);
+            println!("memory capacity: {}", self.memory_capacity());
             panic!("TraceVector is full of capacity: {}", self.capacity());
         }
 
-        // append a new entry to the end of the vector
-        let idx = self.len();
-        // println!("idx: {}", idx);
-        *self.len_mut() += 1;
-        // println!("len: {}", self.len());
-        let entry = self.entry_mut(idx).unwrap();
-        entry.id = id;
-        entry.value = value;
-        // println!("entry: {:?}", entry);
+        // 写入 entry
+        unsafe {
+            let aligned_ptr = (base_ptr as *mut u8).add(alignment_offset);
+            let entry_ptr = aligned_ptr as *mut TraceVectorEntry;
+
+            assert_eq!(
+                entry_ptr as usize % align,
+                0,
+                "TraceVectorEntry pointer is not properly aligned"
+            );
+
+            (*entry_ptr).id = id;
+            (*entry_ptr).length = value.len() as u32;
+
+            // 复制 value 数据
+            let value_offset = std::mem::size_of::<TraceVectorEntry>();
+            let value_ptr = (entry_ptr as *mut u8).add(value_offset);
+            std::ptr::copy_nonoverlapping(value.as_ptr(), value_ptr, value.len());
+        }
+
+        // 更新 header，包括对齐偏移量
+        self.header_mut().len += 1;
+        self.header_mut().offset += total_size;
+
+        // println!(
+        //     "Hit: id: {}, length: {}, offset: {}",
+        //     id,
+        //     value.len(),
+        //     self.header().offset
+        // );
     }
 
-    fn entry(&self, idx: usize) -> Option<&TraceEntry> {
+    fn entry(&self, idx: usize) -> Option<&TraceVectorEntry> {
+        unimplemented!();
         if idx >= self.len() {
             return None;
         }
-        let entry = unsafe {
-            let ptr = self
-                .data_ptr()
-                .offset((idx * size_of::<TraceEntry>()) as isize);
-            &*(ptr as *const TraceEntry)
-        };
-        Some(entry)
+
+        let mut offset = 0;
+        for i in 0..=idx {
+            let entry = unsafe {
+                let ptr = self.data_ptr().add(offset) as *const TraceVectorEntry;
+                &*ptr
+            };
+            if i == idx {
+                return Some(entry);
+            }
+            offset += size_of::<TraceVectorEntry>() + entry.length as usize;
+        }
+        None
     }
 
-    fn entry_mut(&mut self, idx: usize) -> Option<&mut TraceEntry> {
-        if idx >= self.len() {
-            println!("idx >= self.len(): {}", idx);
-            return None;
-        }
-        let entry = unsafe {
-            // println!("data_mut_ptr: {:#x}", self.data_mut_ptr() as usize);
-            let ptr = self
-                .data_mut_ptr()
-                .offset((idx * size_of::<TraceEntry>()) as isize);
-            // println!("ptr: {:#x}", ptr as usize);
-            &mut *(ptr as *mut TraceEntry)
-        };
-        Some(entry)
+    pub fn get_value(&self, idx: usize) -> Option<&[u8]> {
+        unimplemented!();
+        let entry = self.entry(idx)?;
+        Some(unsafe { slice::from_raw_parts(entry.value.as_ptr(), entry.length as usize) })
     }
 
     pub fn data_ptr(&self) -> *const u8 {
@@ -199,14 +285,20 @@ impl TraceVector {
 
     pub fn clear(&mut self) {
         self.header_mut().len = 0;
+        self.header_mut().offset = 0;
     }
 
-    pub fn entries_slice(&self) -> &[TraceEntry] {
-        unsafe { slice::from_raw_parts(self.data_ptr() as *const TraceEntry, self.len()) }
+    pub fn items(&self) -> Vec<TraceItem> {
+        self.iter()
+            .map(|e| TraceItem {
+                id: e.id,
+                value: e.raw_value().to_vec(),
+            })
+            .collect()
     }
 
-    pub fn entries_mut(&mut self) -> &mut [TraceEntry] {
-        unsafe { slice::from_raw_parts_mut(self.data_mut_ptr() as *mut TraceEntry, self.len()) }
+    pub fn entries_slice(&self) -> Vec<&TraceVectorEntry> {
+        self.iter().collect()
     }
 
     pub fn len_mut(&mut self) -> &mut usize {
@@ -227,26 +319,89 @@ impl TraceVector {
             libc::shm_unlink(cname.as_ptr());
         }
     }
+
+    pub fn iter(&self) -> TraceVectorIterator {
+        TraceVectorIterator {
+            trace_vector: self,
+            current_idx: 0,
+            current_offset: 0,
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+pub struct TraceVectorIterator<'a> {
+    trace_vector: &'a TraceVector,
+    current_idx: usize,
+    current_offset: usize,
+}
+
+impl<'a> Iterator for TraceVectorIterator<'a> {
+    type Item = &'a TraceVectorEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_idx >= self.trace_vector.len() {
+            return None;
+        }
+
+        let align = std::mem::align_of::<TraceVectorEntry>();
+
+        // 计算对齐偏移
+        let base_ptr = unsafe { self.trace_vector.data_ptr().add(self.current_offset) };
+        let alignment_offset = base_ptr.align_offset(align) as usize;
+
+        if alignment_offset == usize::MAX {
+            panic!("Cannot align pointer in iterator");
+        }
+
+        // 应用对齐偏移
+        self.current_offset += alignment_offset;
+
+        let entry = unsafe {
+            let ptr =
+                self.trace_vector.data_ptr().add(self.current_offset) as *const TraceVectorEntry;
+            &*ptr
+        };
+
+        // 更新索引和偏移量，为下一次迭代做准备
+        self.current_idx += 1;
+        self.current_offset += size_of::<TraceVectorEntry>() + entry.length as usize;
+
+        Some(entry)
+    }
+}
+
+// 为了方便使用，实现 IntoIterator trait
+impl<'a> IntoIterator for &'a TraceVector {
+    type Item = &'a TraceVectorEntry;
+    type IntoIter = TraceVectorIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[derive(Debug)]
 #[repr(C)]
 struct TraceVectorHeader {
     capacity: usize,
     len: usize,
-    data: [TraceEntry; 0],
+    offset: usize,
+    data: [TraceVectorEntry; 0],
 }
 
 impl TraceVectorHeader {
-    pub fn new(create: bool, len: usize, memory: &mut MmapShMem) -> Result<*mut Self> {
-        assert!(memory.size() >= size_of::<TraceEntry>());
+    pub fn new(create: bool, total_size: usize, memory: &mut MmapShMem) -> Result<*mut Self> {
+        assert!(memory.size() >= size_of::<TraceVectorEntry>());
 
         unsafe {
-            let header: &mut TraceVectorHeader = memory.as_object_mut();
+            let header: &mut TraceVectorHeader = &mut *memory
+                .as_mut_ptr_of::<TraceVectorHeader>()
+                .expect("Failed to get header pointer");
 
             if create {
-                header.capacity = len;
+                header.capacity = total_size - size_of::<Self>();
                 header.len = 0;
+                header.offset = 0;
             }
 
             return Ok(header as *mut TraceVectorHeader);
@@ -254,65 +409,75 @@ impl TraceVectorHeader {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(C)]
-pub struct TraceEntry {
+pub struct TraceVectorEntry {
     /// Some value that is used to map the `TraceEntry` back to another object
     /// after execution (e.g., the VMA).
     pub id: u32,
+    pub length: u32,
+    pub value: [u8; 0],
+}
 
-    pub value: u64,
+impl Display for TraceVectorEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "TraceVectorEntry {{ id: {}, length: {}, value: {:?} }}",
+            self.id,
+            self.length,
+            self.raw_value()
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct Trace {
-    entries: Vec<TraceEntry>,
+    items: Vec<TraceItem>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+
+pub struct TraceItem {
+    pub id: u32,
+    pub value: Vec<u8>,
+}
+
+// 获取 value 的低 bits 位
+// 例如：value = 0x09, bits = 2, 则返回 0x01
+pub fn int_low_bits(value: u64, bits: u16) -> u64 {
+    assert!(bits <= 64);
+    if bits == 64 {
+        return value;
+    }
+    value & ((1 << bits) - 1)
+}
+
+impl TraceVectorEntry {
+    pub fn raw_value(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.value.as_ptr(), self.length as usize) }
+    }
 }
 
 pub const TRACE_HIT_CNT_THRESHOLD: usize = 1000;
 
-pub fn remove_frequent_trace_entries(entries: &[TraceEntry], threshold: usize) -> Vec<TraceEntry> {
-    let len = entries.len();
-    let mut trace_cnt: HashMap<u32, usize> = HashMap::new();
-    for entry in entries {
-        *trace_cnt.entry(entry.id).or_insert(0) += 1;
-    }
-
-    trace_cnt.retain(|_, cnt| *cnt <= threshold);
-    let tracable_ids = trace_cnt.keys().cloned().collect::<HashSet<_>>();
-
-    let entries: Vec<TraceEntry> = entries
-        .iter()
-        .filter(|entry| tracable_ids.contains(&entry.id))
-        .cloned()
-        .collect();
-
-    log::trace!(
-        "remove_frequent_trace_entries: {}({:2.2}%)",
-        len - entries.len(),
-        (len - entries.len()) as f64 / len as f64 * 100.0
-    );
-
-    entries
-}
-
 impl Trace {
-    pub fn from_entries(entries: &[TraceEntry]) -> Self {
-        let entries = remove_frequent_trace_entries(entries, TRACE_HIT_CNT_THRESHOLD);
-
-        Self { entries }
+    pub fn from_items(items: &[TraceItem]) -> Self {
+        Self {
+            items: items.to_vec(),
+        }
     }
 
-    pub fn entries(&self) -> &Vec<TraceEntry> {
-        &self.entries
+    pub fn items(&self) -> &Vec<TraceItem> {
+        &self.items
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.items.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.items.is_empty()
     }
 }
 
@@ -346,7 +511,9 @@ impl TraceSetHeader {
         assert!(memory.size() >= Self::required_size(len));
 
         unsafe {
-            let header: &mut TraceSetHeader = memory.as_object_mut();
+            let header: &mut TraceSetHeader = &mut *memory
+                .as_mut_ptr_of::<TraceSetHeader>()
+                .expect("Failed to get header pointer");
 
             if create {
                 header.capacity = len;
