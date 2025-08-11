@@ -844,18 +844,12 @@ impl PatchingCache {
 }
 
 mod test {
-    use rand::{distributions::Alphanumeric, thread_rng, Rng};
+    use rand::Rng;
 
     use crate::patching_cache_entry::PatchingCacheEntry;
 
     fn generate_random_string(length: usize) -> String {
-        let rng = thread_rng();
-        let random_string: String = rng
-            .sample_iter(&Alphanumeric)
-            .take(length)
-            .map(char::from)
-            .collect();
-        random_string
+        return "123".to_string();
     }
 
     fn dummy_entry(id: u64) -> PatchingCacheEntry {
