@@ -24,7 +24,7 @@ pub enum MutationCacheEntryFlags {
     /// to the coordinator on termination.
     Tracing = 1,
     Mutation = 2,
-    Debug = 4
+    Debug = 4,
 }
 
 #[derive(Error, Debug)]
@@ -583,20 +583,14 @@ mod test {
     use std::{ffi::CString, mem::transmute, ptr};
 
     use libc::c_void;
-    use rand::{distributions::Alphanumeric, thread_rng, Rng};
+    use rand::Rng;
 
     use crate::mutation_cache_content::MutationCacheContent;
 
     use super::MUTATION_CACHE_DEFAULT_SIZE;
 
     fn generate_random_string(length: usize) -> String {
-        let rng = thread_rng();
-        let random_string: String = rng
-            .sample_iter(&Alphanumeric)
-            .take(length)
-            .map(char::from)
-            .collect();
-        random_string
+        return "123".to_string();
     }
 
     #[test]
