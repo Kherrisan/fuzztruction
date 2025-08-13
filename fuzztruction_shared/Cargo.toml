@@ -2,7 +2,7 @@
 name = "fuzztruction_shared"
 version = "0.1.0"
 authors = ["Nils Bars <nils.bars@rub.de>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 shared_memory = { git = "https://github.com/elast0ny/shared_memory-rs", rev = "4879c7641f64d444420b81fd32f496939ee7155d", package = "shared_memory" }
