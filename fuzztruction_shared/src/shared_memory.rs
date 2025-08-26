@@ -113,11 +113,11 @@ impl MmapShMem {
     }
 
     pub fn write_to_env(&self, name: &str) -> Result<()> {
-        env::set_var(format!("PINGU_SHM_{}_PATH", name), self.path.to_owned());
+        unsafe {env::set_var(format!("PINGU_SHM_{}_PATH", name), self.path.to_owned());
         env::set_var(
             format!("PINGU_SHM_{}_SIZE", name),
             self.map_size.to_string(),
-        );
+        );}
 
         log::debug!(
             "shm PINGU_SHM_{name}_PATH:{path} PINGU_SHM_{name}_SIZE:{size} fd: {fd}",
@@ -131,7 +131,7 @@ impl MmapShMem {
     }
 
     pub fn new_shmem(map_size: usize, label: &str) -> Result<MmapShMem> {
-        let rnd_suffix: u32 = rand::thread_rng().gen();
+        let rnd_suffix: u32 = rand::rng().random_range(0..u32::MAX);
         let path = format!("/pingu_{label}_{rnd_suffix}");
         Ok(MmapShMem::new(path, map_size, true)?)
     }

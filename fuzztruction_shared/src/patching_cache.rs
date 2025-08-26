@@ -121,7 +121,7 @@ pub struct PatchingCache {
     backing_memory: backing_memory::Memory,
     content_size: usize,
     content: PatchingCacheContentRawPtr,
-    b_tree: BTreeMap<PatchPointID, usize>,
+    b_tree: Option<BTreeMap<PatchPointID, usize>>,
 }
 
 impl Clone for PatchingCache {
@@ -365,8 +365,7 @@ impl PatchingCache {
                 // Not aligned, need to remap to an aligned address
                 trace!(
                     "Shared memory not aligned (addr={:p}, align={}), remapping...",
-                    mapping,
-                    max_align
+                    mapping, max_align
                 );
 
                 // Unmap the current mapping
@@ -446,7 +445,7 @@ impl PatchingCache {
                 }),
                 content_size: size,
                 content: PatchingCacheContentRawPtr(ptr),
-                b_tree: BTreeMap::new(),
+                b_tree: Some(BTreeMap::new()),
             });
         };
     }
@@ -500,7 +499,7 @@ impl PatchingCache {
             }),
             content_size: size,
             content: PatchingCacheContentRawPtr(mutation_cache_content),
-            b_tree: BTreeMap::new(),
+            b_tree: Some(BTreeMap::new()),
         });
     }
 
@@ -569,7 +568,7 @@ impl PatchingCache {
             if ops.len() > 0 {
                 self.content_mut().push_op_batch(idx, &ops)?;
             }
-            self.b_tree.insert(entry.id(), idx);
+            self.b_tree.as_mut().unwrap().insert(entry.id(), idx);
 
             Ok(())
         })
@@ -579,7 +578,7 @@ impl PatchingCache {
     /// !!! This will invalidate all references to the cached entries !!!
     pub fn remove(&mut self, id: PatchPointID) -> Result<()> {
         self.content_mut().remove(id).and_then(|_| {
-            self.b_tree.remove(&id);
+            self.b_tree.as_mut().unwrap().remove(&id);
             Ok(())
         })
     }
@@ -587,7 +586,7 @@ impl PatchingCache {
     /// Clears the content of the cache.
     pub fn clear(&mut self) {
         self.content_mut().clear();
-        self.b_tree.clear();
+        self.b_tree.as_mut().unwrap().clear();
     }
 
     pub fn clear_by_flag(&mut self, flag: PatchingCacheEntryFlags) {
@@ -618,10 +617,13 @@ impl PatchingCache {
             Err(PatchingCacheError::CacheOverflow)
                 .context("Can not replace cache content with content from a larger cache.")?
         }
+        // assert_eq!(self.content_size, other.content_size);
+
+        // self.b_tree = other.b_tree.clone();
 
         // Copy the element (both the entries and the operations) from the other cache
         // into our content space.
-        // self.content_mut().clear();
+
         for entry in self.entries_mut() {
             entry.set_dirty(PatchingCacheEntryDirty::Clear);
         }
@@ -629,36 +631,56 @@ impl PatchingCache {
         for entry_idx in other.content().iter() {
             let new_entry = other.content().entry_ref(entry_idx);
 
-            if let Some(&current_idx) = self.b_tree.get(&new_entry.id()) {
+            if let Some(&current_idx) = self.b_tree.as_ref().unwrap().get(&new_entry.id()) {
                 let current_entry = self.content().entry_mut(current_idx);
 
                 if current_entry.flags() != new_entry.flags() {
+                    // The entry is already in the cache, but the flags are different.
+                    // We need to update the flags, and recompiling the code
                     current_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
                     current_entry.set_flags(new_entry.flags());
+                } else {
+                    // The entry is already in the cache, and the flags are unchanged.
+                    // We need to update the entry in the cache.
+                    current_entry.set_dirty(PatchingCacheEntryDirty::Nop);
                 }
 
                 let ops = other.content().ops(entry_idx);
                 let current_ops = self.content().ops(current_idx);
                 if current_ops != ops {
-                    current_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                    // The patching operations are different.
+                    // Clear the current operations, and push the new ones.
+                    // Note that the code does not need to be re-compiled.
                     self.content_mut().clear_entry_ops(current_idx)?;
                     self.content_mut().push_op_batch(current_idx, &ops)?;
                 }
             } else {
+                // The entry is not in the cache, so we need to add it.
                 let ops = other.content().ops(entry_idx);
                 self.push(new_entry.clone(), ops)?;
             }
         }
 
-        // let dst = self.content_slice_mut();
-        // let src = other.content_slice();
-        // dst[..src.len()].copy_from_slice(src);
+        Ok(())
+    }
 
-        // // Copy the other content into our content buffer. We checked that
-        // // the other content is <= our content, thus this is safe.
-        // let dst = self.content_slice_mut();
-        // let src = other.content_slice();
-        // dst[..src.len()].copy_from_slice(src);
+    /***
+     * Restore the content of the cache from another cache.
+     *
+     * This is used to restore the cache from a **backup** cache.
+     * Make this cache the exact same as the backup cache.
+     */
+    pub fn restore(&mut self, backup: &PatchingCache) -> Result<()> {
+        assert_eq!(self.content_size, backup.content_size);
+
+        self.b_tree = backup.b_tree.clone();
+
+        self.content_mut().clear();
+        // Copy the other content into our content buffer. We checked that
+        // the other content is <= our content, thus this is safe.
+        let dst = self.content_slice_mut();
+        let src = backup.content_slice();
+        dst[..src.len()].copy_from_slice(src);
 
         // // The copied content might stream from a cache that was smaller than us,
         // // hence we need to inform the MutationCacheContent that its backing memory
@@ -720,7 +742,7 @@ impl PatchingCache {
                 continue;
             }
             let pp_id = other_entry.id();
-            if let Some(&idx) = self.b_tree.get(&pp_id) {
+            if let Some(&idx) = self.b_tree.as_ref().unwrap().get(&pp_id) {
                 let entry = self.content().entry_mut(idx);
 
                 if !entry.is_flag_set(flag) {
@@ -743,7 +765,12 @@ impl PatchingCache {
                         let ops = self.content().ops(idx);
 
                         if ops != other_ops {
-                            entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                            // patching operations are executed dynamically,
+                            // inside the `patching_xxx` stub,
+                            // so the code does not need to be re-compiled.
+                            //
+                            // Therefore, we do not need to set the entry dirty here.
+                            // entry.set_dirty(PatchingCacheEntryDirty::Dirty);
                             self.content_mut().clear_entry_ops(idx)?;
                             self.content_mut().push_op_batch(idx, &other_ops)?;
                         }
@@ -844,9 +871,17 @@ impl PatchingCache {
 }
 
 mod test {
+    use std::{ffi::CString, mem::transmute};
+
     use rand::Rng;
 
-    use crate::patching_cache_entry::PatchingCacheEntry;
+    use crate::{
+        patching_cache::{
+            PATCHING_CACHE_DEFAULT_ENTRY_SIZE, PATCHING_CACHE_DEFAULT_OP_SIZE, PatchingCache,
+        },
+        patching_cache_content::PatchingCacheContent,
+        patching_cache_entry::PatchingCacheEntry,
+    };
 
     fn generate_random_string(length: usize) -> String {
         return "123".to_string();
@@ -863,6 +898,16 @@ mod test {
             0,
             0,
         )
+    }
+
+    #[test]
+    fn test_backup_restore() {
+        for size in [100, 101, 102, 10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10009, 10010] {
+            let cache = PatchingCache::new(size, size).unwrap();
+            let backup = cache.clone();
+
+            assert_eq!(cache.total_size(), backup.total_size());
+        }
     }
 
     #[test]

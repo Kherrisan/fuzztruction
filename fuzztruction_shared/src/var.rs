@@ -229,7 +229,7 @@ impl VarType {
             VarType::Array { size, .. } => (size.unwrap_or(1) as u64 + 7) / 8,
             VarType::Other { .. } => 8,
             VarType::Struct { .. } => 8,
-            VarType::Enum { .. } => 8,
+            VarType::Enum { .. } => 4,
             VarType::Union { .. } => 8,
         }
     }
@@ -239,6 +239,33 @@ impl VarType {
             VarType::Pointer { pointee, .. } => Some(pointee),
             VarType::Array { element, .. } => Some(element),
             _ => None,
+        }
+    }
+
+    pub fn is_pointer(&self) -> bool {
+        match self {
+            VarType::Pointer { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        match self {
+            VarType::Int { .. } => true,
+            VarType::Float { .. } => true,
+            VarType::Bitfield { .. } => true,
+            VarType::Enum { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_composite(&self) -> bool {
+        match self {
+            VarType::Pointer { .. } => true,
+            VarType::Array { .. } => true,
+            VarType::Struct { .. } => true,
+            VarType::Union { .. } => true,
+            _ => false,
         }
     }
 

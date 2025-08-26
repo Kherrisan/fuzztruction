@@ -46,11 +46,17 @@ pub const PATCHING_OPERATORS: [PatchingOperator; 12] = [
 ];
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash)]
+#[derive(Clone, Copy, Serialize, Deserialize, Hash)]
 pub struct PatchingOperation {
     pub op: PatchingOperator,
     pub operand: u64,
     pub next_idx: Option<usize>,
+}
+
+impl std::fmt::Debug for PatchingOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PatchingOperation {{ op: {:?}, operand: 0x{:x} }}", self.op, self.operand)
+    }
 }
 
 impl Eq for PatchingOperation {}
@@ -122,7 +128,7 @@ fn flags_to_str(flags: u8) -> String {
 
 impl std::fmt::Debug for PatchingCacheEntryMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MutationCacheEntryMetadata")
+        f.debug_struct("PatchingCacheEntryMetadata")
             .field("id", &self.id)
             .field("vma", &format!("0x{:x}", self.vma))
             .field("flags", &flags_to_str(self.flags))

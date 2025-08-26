@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Local};
 use libafl_bolts::rands::Rand;
 use log::log_enabled;
@@ -6,12 +7,12 @@ use serde::Serialize;
 use std::{
     alloc,
     convert::TryInto,
-    fs::{self, read_link, OpenOptions},
+    fs::{self, OpenOptions, read_link},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -220,6 +221,95 @@ pub fn shuffle<T, R: Rand>(slice: &mut [T], rng: &mut R) {
     for i in (1..len).rev() {
         let j = rng.below_or_zero(i + 1);
         slice.swap(i, j);
+    }
+}
+
+pub fn check_uid_gid() {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    println!("UID: {}, GID: {}", uid, gid);
+    let euid = unsafe { libc::geteuid() };
+    let egid = unsafe { libc::getegid() };
+    println!("EUID: {}, EGID: {}", euid, egid);
+}
+
+pub fn check_rlimit_core_unlimited() {
+    unsafe {
+        let mut rlim: libc::rlimit = std::mem::zeroed();
+        let get_ret = libc::getrlimit(libc::RLIMIT_CORE, &mut rlim as *mut libc::rlimit);
+        assert_eq!(get_ret, 0, "Failed to get core limit");
+        println!("Core limit: cur={}, max={}", rlim.rlim_cur, rlim.rlim_max);
+        assert_eq!(rlim.rlim_cur, libc::RLIM_INFINITY);
+        assert_eq!(rlim.rlim_max, libc::RLIM_INFINITY);
+    }
+}
+
+pub fn set_rlimit_core_unlimited() -> Result<()> {
+    unsafe {
+        let mut rlim: libc::rlimit = std::mem::zeroed();
+        let get_ret = libc::getrlimit(libc::RLIMIT_CORE, &mut rlim as *mut libc::rlimit);
+        if get_ret != 0 {
+            return Err(anyhow!("Failed to get core limit"));
+        }
+        println!("Core limit before setting: cur={}, max={}", rlim.rlim_cur, rlim.rlim_max);
+
+        let mut rlim: libc::rlimit = std::mem::zeroed();
+        rlim.rlim_cur = libc::RLIM_INFINITY;
+        rlim.rlim_max = libc::RLIM_INFINITY;
+        let set_ret = libc::setrlimit(libc::RLIMIT_CORE, &rlim as *const libc::rlimit);
+        if set_ret != 0 {
+            return Err(anyhow!("Failed to set core limit"));
+        }
+
+        // recheck the core limit
+        let mut rlim: libc::rlimit = std::mem::zeroed();
+        let get_ret = libc::getrlimit(libc::RLIMIT_CORE, &mut rlim as *mut libc::rlimit);
+        if get_ret != 0 {
+            return Err(anyhow!("Failed to get core limit"));
+        }
+        if rlim.rlim_cur != libc::RLIM_INFINITY {
+            return Err(anyhow!(
+                "After setting core limit to unlimited, it is still not unlimited"
+            ));
+        } else {
+            log::info!("Core rlim_cur after setting: {}", rlim.rlim_cur);
+        }
+        if rlim.rlim_max != libc::RLIM_INFINITY {
+            return Err(anyhow!(
+                "After setting core limit to unlimited, it is still not unlimited"
+            ));
+        } else {
+            log::info!("Core rlim_max after setting: {}", rlim.rlim_max);
+        }
+    }
+    Ok(())
+}
+
+pub fn check_core_dumpable() -> Result<()> {
+    unsafe {
+        let ret = libc::prctl(libc::PR_GET_DUMPABLE);
+        if ret != 1 {
+            return Err(anyhow!("Core dumpable is not enabled"));
+        }
+        log::info!("Core dumpable: {}", ret);
+        Ok(())
+    }
+}
+
+pub fn set_core_dumpable() -> Result<()> {
+    unsafe {
+        let ret = libc::prctl(libc::PR_SET_DUMPABLE, 1);
+        if ret != 0 {
+            return Err(anyhow!("Failed to set core dumpable"));
+        }
+        let ret = libc::prctl(libc::PR_GET_DUMPABLE);
+        if ret != 1 {
+            return Err(anyhow!(
+                "After setting core dumpable, it is still not dumpable"
+            ));
+        }
+        log::info!("Core dumpable: {}", ret);
+        Ok(())
     }
 }
 

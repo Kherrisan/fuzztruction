@@ -79,12 +79,12 @@ impl Jail {
         Ok(ret)
     }
 
-    fn acquire_privileges(&self) -> Result<()> {
+    pub fn acquire_privileges(&self) -> Result<()> {
         acquire_privileges()?;
         Ok(())
     }
 
-    fn drop_privileges(&self, permanent: bool) -> Result<()> {
+    pub fn drop_privileges(&self, permanent: bool) -> Result<()> {
         if let Some(target_ids) = self.builder.drop_to {
             drop_privileges(target_ids.0, target_ids.1, permanent)?
         }

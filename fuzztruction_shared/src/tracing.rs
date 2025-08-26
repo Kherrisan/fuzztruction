@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use core::slice;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -176,23 +176,16 @@ impl TraceVector {
         self.entry(self.len() - 1)
     }
 
-    pub fn hit_value<T>(&mut self, id: u32, value: T) {
-        if id == 53342 {
-            println!("a");
-        }
+    pub fn hit(&mut self, id: u32) {
+        let empty_slice: Vec<u8> = vec![];
+        self.hit_slice(id, &empty_slice);
+    }
 
+    pub fn hit_value<T>(&mut self, id: u32, value: T) {
         let value_bytes = unsafe {
             std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
         };
-        if id == 53342 {
-            println!("b");
-        }
-
         self.hit_slice(id, value_bytes);
-        
-        if id == 53342 {
-            println!("c");
-        }
     }
 
     pub fn hit_slice(&mut self, id: u32, value: &[u8]) {
@@ -672,8 +665,8 @@ mod tests {
     #[test]
     fn trace_set() {
         let mut set = TraceSet::new_with_env(u32::MAX as usize, "test").unwrap();
-        let mut rng = rand::thread_rng();
-        let nums: Vec<u32> = (0..900).map(|_| rng.gen::<u32>()).collect();
+        let mut rng = rand::rng();
+        let nums: Vec<u32> = (0..900).map(|_| rng.random_range(0..u32::MAX)).collect();
 
         for &num in nums.iter() {
             set.add(num);

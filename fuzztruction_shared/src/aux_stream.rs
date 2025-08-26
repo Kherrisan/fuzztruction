@@ -143,8 +143,8 @@ impl AuxStreamAssembler {
 
 #[cfg(test)]
 mod test {
-    #[allow(unused)]
-    use rand::{distributions::Alphanumeric, thread_rng, Rng};
+
+    use rand::{distr::Alphanumeric, Rng};
 
     use super::AuxStreamBuilder;
     use crate::{aux_messages::AuxStreamType, aux_stream::AuxStreamAssembler};
@@ -181,8 +181,8 @@ mod test {
     #[test]
     fn test_disassemble_assemble() {
         (0..1000).for_each(|_| {
-            let len = rand::thread_rng().gen_range(1..5134);
-            let payload: String = thread_rng()
+            let len = rand::rng().random_range(1..5134);
+            let payload: String = rand::rng()
                 .sample_iter(&Alphanumeric)
                 .take(len)
                 .map(char::from)
