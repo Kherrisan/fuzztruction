@@ -1,15 +1,12 @@
 use std::{
     borrow::Borrow,
-    collections::{hash_set, HashSet},
+    collections::{HashSet, hash_set},
     fmt, hash,
     marker::PhantomData,
 };
 
 use crate::{constants::MAX_PATCHPOINT_CNT, types::PatchPointID};
-use rand::{
-    prelude::{IteratorRandom, SliceRandom},
-    thread_rng, Rng,
-};
+use rand::{prelude::SliceRandom, thread_rng};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -211,7 +208,7 @@ where
 
         let mut ret = self.clone();
         a.zip(b).zip(ret.data.iter_mut()).for_each(|e| {
-            *e.1 = e.0 .0 | e.0 .1;
+            *e.1 = e.0.0 | e.0.1;
         });
 
         ret
@@ -244,7 +241,7 @@ where
 
         let mut ret = self.clone();
         a.zip(b).zip(ret.data.iter_mut()).for_each(|e| {
-            *e.1 = e.0 .0 & e.0 .1;
+            *e.1 = e.0.0 & e.0.1;
         });
 
         ret
@@ -303,7 +300,7 @@ where
 
         let mut ret = self.clone();
         a.zip(b).zip(ret.data.iter_mut()).for_each(|e| {
-            *e.1 = e.0 .0 & !e.0 .1;
+            *e.1 = e.0.0 & !e.0.1;
         });
 
         ret

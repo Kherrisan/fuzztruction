@@ -6,10 +6,12 @@ use nix::sys::signal::Signal;
 use serde::Serialize;
 use std::{
     alloc,
+    collections::HashMap,
     convert::TryInto,
     fs::{self, OpenOptions, read_link},
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,6 +19,26 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+pub fn shell_execute(command: &str, args: Vec<&str>) -> Result<String> {
+    let mut cmd = Command::new(command);
+    cmd.args(args);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        return Err(anyhow!("Failed to run command: {}", command));
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+pub fn print_pstree() {
+    let current_pid = unsafe { libc::getpid() };
+    let output = shell_execute(
+        "pstree",
+        vec!["-p", "-a", "-h", "-l", &current_pid.to_string()],
+    )
+    .unwrap();
+    println!("pstree: {}", output);
+}
 
 pub trait ExpectNone {
     /// Whether this value is None.
@@ -251,7 +273,10 @@ pub fn set_rlimit_core_unlimited() -> Result<()> {
         if get_ret != 0 {
             return Err(anyhow!("Failed to get core limit"));
         }
-        println!("Core limit before setting: cur={}, max={}", rlim.rlim_cur, rlim.rlim_max);
+        println!(
+            "Core limit before setting: cur={}, max={}",
+            rlim.rlim_cur, rlim.rlim_max
+        );
 
         let mut rlim: libc::rlimit = std::mem::zeroed();
         rlim.rlim_cur = libc::RLIM_INFINITY;
@@ -335,5 +360,10 @@ mod test {
 
         let s = unsafe { slice::from_raw_parts_mut(e.as_mut() as *mut u8, size) };
         s.fill(0xff);
+    }
+
+    #[test]
+    fn test_process_tree() {
+        print_pstree();
     }
 }
