@@ -585,13 +585,27 @@ impl PatchingCache {
 
     /// Clears the content of the cache.
     pub fn clear(&mut self) {
-        self.content_mut().clear();
-        self.b_tree.as_mut().unwrap().clear();
+        self.entries_mut().iter_mut().for_each(|e| {
+            e.set_dirty(PatchingCacheEntryDirty::Clear);
+        });
+    }
+
+    pub fn clear_by<F>(&mut self, f: F)
+    where
+        F: Fn(&PatchingCacheEntry) -> bool,
+    {
+        self.entries_mut().iter_mut().for_each(|e| {
+            if f(e) {
+                e.set_dirty(PatchingCacheEntryDirty::Clear);
+            }
+        });
     }
 
     pub fn clear_by_flag(&mut self, flag: PatchingCacheEntryFlags) {
         self.content_mut().entries_mut().iter_mut().for_each(|e| {
-            e.unset_flag(flag);
+            if e.is_flag_set(flag) {
+                e.set_dirty(PatchingCacheEntryDirty::Clear);
+            }
         });
     }
 
@@ -692,11 +706,11 @@ impl PatchingCache {
 
     /// Only retain elements for which `f` returns true.
     /// !!! This will invalidate all references to the contained entries !!!
-    pub fn retain<F>(&mut self, f: F)
+    pub fn retain<F>(&mut self, f: F) -> usize
     where
         F: FnMut(&PatchingCacheEntry) -> bool,
     {
-        self.content_mut().retain(f);
+        self.content_mut().retain(f)
     }
 
     /// Only retain MutationCacheEntry's that actually affect the execution.
@@ -848,9 +862,8 @@ impl PatchingCache {
         self
     }
 
-    pub fn remove_cleared_entries(&mut self) -> &mut Self {
-        self.retain(|e| !e.is_clear());
-        self
+    pub fn remove_cleared_entries(&mut self) -> usize {
+        self.retain(|e| !e.is_clear())
     }
 }
 
@@ -902,7 +915,10 @@ mod test {
 
     #[test]
     fn test_backup_restore() {
-        for size in [100, 101, 102, 10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10009, 10010] {
+        for size in [
+            100, 101, 102, 10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10009,
+            10010,
+        ] {
             let cache = PatchingCache::new(size, size).unwrap();
             let backup = cache.clone();
 

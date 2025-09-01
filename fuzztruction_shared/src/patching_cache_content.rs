@@ -813,15 +813,19 @@ impl PatchingCacheContent {
         Ok(())
     }
 
-    pub fn retain<F>(&mut self, mut f: F)
+    pub fn retain<F>(&mut self, mut f: F) -> usize
     where
         F: FnMut(&PatchingCacheEntry) -> bool,
     {
+        let mut removed_count = 0;
         self.entry_bitmap.iter().for_each(|idx| {
             if !f(self.entry_ref(idx)) {
                 self.remove_entry_idx(idx).unwrap();
+                removed_count += 1;
             }
         });
+
+        removed_count
     }
 
     pub fn remove(&mut self, id: PatchPointID) -> Result<usize> {
