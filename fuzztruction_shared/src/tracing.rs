@@ -285,7 +285,7 @@ impl TraceVector {
         self.iter()
             .map(|e| TraceItem {
                 id: e.id,
-                value: e.raw_value().to_vec(),
+                value: e.value().to_vec(),
             })
             .collect()
     }
@@ -419,7 +419,7 @@ impl Display for TraceVectorEntry {
             "TraceVectorEntry {{ id: {}, length: {}, value: {:?} }}",
             self.id,
             self.length,
-            self.raw_value()
+            self.value()
         )
     }
 }
@@ -447,7 +447,7 @@ pub fn int_low_bits(value: u64, bits: u16) -> u64 {
 }
 
 impl TraceVectorEntry {
-    pub fn raw_value(&self) -> &[u8] {
+    pub fn value(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.value.as_ptr(), self.length as usize) }
     }
 }
