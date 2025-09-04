@@ -119,10 +119,10 @@ where
         &self,
         max: usize,
         rand: &mut R,
-    ) -> HashSet<U> {
+    ) -> Vec<U> {
         // 使用 libafl_bolts::rands::Rand 实现从集合中随机选择不超过 max 个元素
         // 1. 收集所有元素
-        let mut entries: Vec<U> = self.entries().into_iter().collect();
+        let mut entries: Vec<U> = self.into();
         let total = entries.len();
 
         // 2. 如果元素数量小于等于 max，直接返回所有元素
@@ -166,6 +166,32 @@ where
 }
 
 impl<U, const N: usize> Eq for FiniteIntegerSet<U, N> where U: From<usize> + Eq + hash::Hash {}
+
+impl<U, const N: usize> Into<Vec<U>> for &FiniteIntegerSet<U, N>
+where
+    U: From<usize> + Eq + hash::Hash + Clone + fmt::Debug,
+{
+    fn into(self) -> Vec<U> {
+        let mut v = vec![];
+        for (byte_idx, byte) in self.data.iter().enumerate() {
+            for bit_idx in 0..8 {
+                if (byte & (1 << bit_idx)) > 0 {
+                    v.push((byte_idx * 8 + bit_idx).into());
+                }
+            }
+        }
+        v
+    }
+}
+
+impl<U, const N: usize> Into<Vec<U>> for FiniteIntegerSet<U, N>
+where
+    U: From<usize> + Eq + hash::Hash + Clone + fmt::Debug,
+{
+    fn into(self) -> Vec<U> {
+        (&self).into()
+    }
+}
 
 impl<U, const N: usize> FromIterator<U> for FiniteIntegerSet<U, N>
 where

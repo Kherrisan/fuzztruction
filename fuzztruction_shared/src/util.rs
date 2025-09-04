@@ -338,6 +338,19 @@ pub fn set_core_dumpable() -> Result<()> {
     }
 }
 
+/**
+ * Read random data from /dev/random
+ */
+pub fn read_random_dev(size: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(size);
+
+    let mut file = std::fs::File::open("/dev/random").expect("Failed to open /dev/random");
+    file.read(&mut data)
+        .expect("Failed to read from /dev/random");
+
+    data
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

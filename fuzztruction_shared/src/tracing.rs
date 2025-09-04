@@ -11,7 +11,7 @@ use std::{
     mem::size_of,
 };
 
-use crate::{constants::ENV_FT_SET_SHM, types::PatchPointID};
+use crate::constants::ENV_FT_SET_SHM;
 
 use super::shared_memory::MmapShMem;
 

@@ -1,8 +1,9 @@
 use std::{
     assert_matches::assert_matches,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     env,
     ffi::CString,
+    fmt::Debug,
     mem, slice,
 };
 
@@ -116,12 +117,35 @@ struct PatchingCacheContentRawPtr(*mut PatchingCacheContent);
 
 unsafe impl Send for PatchingCacheContentRawPtr {}
 
-#[derive(Debug)]
 pub struct PatchingCache {
     backing_memory: backing_memory::Memory,
     content_size: usize,
     content: PatchingCacheContentRawPtr,
     b_tree: Option<BTreeMap<PatchPointID, usize>>,
+}
+
+impl Debug for PatchingCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut nop_cnt = 0;
+        let mut dirty_cnt = 0;
+        let mut clear_cnt = 0;
+        for entry in self.entries() {
+            if entry.is_dirty() {
+                dirty_cnt += 1;
+            } else if entry.is_clear() {
+                clear_cnt += 1;
+            } else {
+                nop_cnt += 1;
+            }
+        }
+        write!(f, "PatchingCache {{\n")?;
+        write!(f, "    total_size: {},\n", self.total_size())?;
+        write!(f, "    used_len: {},\n", self.len())?;
+        write!(f, "    nop_cnt: {},\n", nop_cnt)?;
+        write!(f, "    dirty_cnt: {},\n", dirty_cnt)?;
+        write!(f, "    clear_cnt: {},\n", clear_cnt)?;
+        write!(f, "}}")
+    }
 }
 
 impl Clone for PatchingCache {
@@ -762,6 +786,17 @@ impl PatchingCache {
                 if !entry.is_flag_set(flag) {
                     entry.set_flag(flag);
                     entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+                } else {
+                    // The patching cache entry dirty flag could be clear or nop.
+                    // - Nop could be set by the agent when synchronizing the patching cache.
+                    // - Clear could be set by the fuzzer when restore the patching cache after executing target.
+                    // When the flag is clear, and the patching flag does not change.
+                    // the entry could be reused, so set the dirty flag as nop.
+                    if entry.is_clear() {
+                        entry.set_dirty(PatchingCacheEntryDirty::Nop);
+                    }
+                    // If the dirty flag is nop, and the patching flag does not change.
+                    // the entry could be reused, so keep the nop unchanged.
                 }
 
                 if entry.is_flag_set(PatchingCacheEntryFlags::Patching)

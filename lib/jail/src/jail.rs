@@ -4,13 +4,16 @@ use std::{
     collections::HashSet,
     env,
     ffi::OsStr,
-    fs, io,
+    fs,
+    io::{self, Read as _},
     os::unix,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command},
 };
 use tempfile;
 use thiserror::Error;
+
+use crate::utils::generate_deterministic_random;
 
 #[derive(Error, Debug)]
 pub enum JailError {
@@ -66,7 +69,7 @@ pub fn acquire_privileges() -> Result<()> {
 impl Jail {
     fn from_builder(builder: JailBuilder) -> Result<Jail> {
         let new_root = tempfile::Builder::new()
-            .prefix("ft_jail_")
+            .prefix("pingu_jail_")
             .tempdir_in("/tmp")
             .context("Failed to create new root directory in /tmp")?;
         let new_root = new_root.into_path();
@@ -118,6 +121,14 @@ impl Jail {
         Ok(ret)
     }
 
+    fn mock_random_dev(&self) -> Result<String> {
+        let fake_random_file = format!("{}/tmp/fake_random", self.new_root);
+        let fake_random_data = generate_deterministic_random(64 * 1024 * 1024);
+        std::fs::write(&fake_random_file, fake_random_data)?;
+
+        Ok(fake_random_file)
+    }
+
     /// Enter the Jail. This will cause the calling process to be moved into the
     /// Jail. Calling this function requires the calling process to have EUID of 0.
     pub fn enter(&mut self) -> Result<()> {
@@ -136,7 +147,7 @@ impl Jail {
         }
 
         // Create the directory we are going to perpare our new root tree.
-        println!("Root is at {:?}", self.new_root);
+        println!("New root is at {:?}", self.new_root);
 
         // Mount the bear minimum to allow execution of software.
 
@@ -152,14 +163,6 @@ impl Jail {
         Jail::mount(&["-o", "rbind", "/dev", &format!("{}/dev", self.new_root)])
             .context("Failed to mount /dev")?;
 
-        if self.builder.no_random_devices {
-            // Mount /dev/zero in place of the listed devices.
-            for dst in ["random", "urandom"] {
-                Jail::mount(&["-o", "bind", "/dev/zero", &format!("/dev/{}", dst)])
-                    .context(format!("Failed to mount /dev/zero to {}", dst))?;
-            }
-        }
-
         // mount tmpfs at /tmp
         Jail::mount(&[
             "-t",
@@ -170,6 +173,21 @@ impl Jail {
             &format!("{}/tmp", self.new_root),
         ])
         .context("Failed mount tmpfs to /tmp in new root")?;
+
+        if self.builder.no_random_devices {
+            let fake_random_file = self.mock_random_dev()?;
+
+            // Mount fake_random_file(/new_root/tmp/fake_random) in place of the listed random devices.
+            for dst in ["random", "urandom"] {
+                Jail::mount(&[
+                    "-o",
+                    "bind",
+                    &fake_random_file,
+                    &format!("{}/dev/{}", self.new_root, dst),
+                ])
+                .context(format!("Failed to mount {} to {}", &fake_random_file, dst))?;
+            }
+        }
 
         // Mount all RW dirs
         for path in self.builder.rw_binds.iter() {
@@ -211,7 +229,17 @@ impl Jail {
         let out = process::Command::new("cat")
             .args(["/proc/self/mountinfo"])
             .output();
-        println!("{}", String::from_utf8(out.unwrap().stdout).unwrap());
+        println!(
+            "mountinfo: \n{}",
+            String::from_utf8(out.unwrap().stdout).unwrap()
+        );
+
+        let mut data = vec![0; 16];
+        let mut file = std::fs::File::open("/dev/random").expect("Failed to open /dev/random");
+        file.read(&mut data)
+            .expect("Failed to read from /dev/random");
+
+        println!("Jail.enter: Test reading random data: {:?}", data);
 
         Ok(())
     }
