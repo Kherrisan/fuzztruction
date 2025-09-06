@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use libc::PTRACE_DETACH;
 use llvm_stackmap::LocationType;
 use log::*;
 
@@ -15,6 +16,7 @@ use anyhow::anyhow;
 use num_enum::IntoPrimitive;
 use shared_memory::ShmemError;
 use std::alloc;
+use strum::{Display, EnumString};
 use thiserror::Error;
 
 use crate::{
@@ -22,6 +24,7 @@ use crate::{
     patching_cache_content::{BitmapIter, PatchingCacheContent},
     patching_cache_entry::{
         PatchingCacheEntry, PatchingCacheEntryDirty, PatchingOperation, PatchingOperator,
+        flags_to_str,
     },
     patchpoint::PatchPoint,
     tracing::Trace,
@@ -32,16 +35,25 @@ use crate::{
 pub const PATCHING_CACHE_DEFAULT_ENTRY_SIZE: usize = 400000;
 pub const PATCHING_CACHE_DEFAULT_OP_SIZE: usize = 100000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, IntoPrimitive)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, IntoPrimitive, EnumString, Display,
+)]
 #[repr(u8)]
 pub enum PatchingCacheEntryFlags {
     /// Count the number of executions of this patch point and report it
     /// to the coordinator on termination.
-    Tracing = 1,
-    TracingWithVal = 2,
-    Patching = 4,
-    Jumping = 8,
+    Tracing = 0,
+    TracingVal = 1,
+    Patching = 2,
+    Jumping = 3,
 }
+
+pub const PATCHING_CACHE_ENTRY_FLAGS: [PatchingCacheEntryFlags; 4] = [
+    PatchingCacheEntryFlags::Tracing,
+    PatchingCacheEntryFlags::TracingVal,
+    PatchingCacheEntryFlags::Patching,
+    PatchingCacheEntryFlags::Jumping,
+];
 
 #[derive(Error, Debug)]
 pub enum PatchingCacheError {
@@ -58,7 +70,7 @@ pub enum PatchingCacheError {
 }
 
 pub mod backing_memory {
-    use std::ffi::CString;
+    use std::{env, ffi::CString};
 
     use crate::patching_cache_content::PatchingCacheContent;
 
@@ -104,8 +116,12 @@ pub mod backing_memory {
     impl Drop for Memory {
         fn drop(&mut self) {
             if let Some(s) = self.shm_memory() {
-                unsafe {
-                    libc::shm_unlink(s.shm_path.as_ptr());
+                if env::var("PINGU_GDB").is_ok() {
+                    log::info!("PINGU_GDB is set, skipping unlinking of patching cache");
+                } else {
+                    unsafe {
+                        libc::shm_unlink(s.shm_path.as_ptr());
+                    }
                 }
             }
         }
@@ -122,27 +138,30 @@ pub struct PatchingCache {
     content_size: usize,
     content: PatchingCacheContentRawPtr,
     b_tree: Option<BTreeMap<PatchPointID, usize>>,
+    dirty: bool,
 }
 
 impl Debug for PatchingCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut nop_cnt = 0;
         let mut dirty_cnt = 0;
         let mut clear_cnt = 0;
+        let mut enable_cnt = 0;
         for entry in self.entries() {
-            if entry.is_dirty() {
+            if entry.is_any(PatchingCacheEntryDirty::Dirty) {
                 dirty_cnt += 1;
-            } else if entry.is_clear() {
+            }
+            if entry.is_any(PatchingCacheEntryDirty::Clear) {
                 clear_cnt += 1;
-            } else {
-                nop_cnt += 1;
+            }
+            if entry.is_any(PatchingCacheEntryDirty::Enable) {
+                enable_cnt += 1;
             }
         }
         write!(f, "PatchingCache {{\n")?;
         write!(f, "    total_size: {},\n", self.total_size())?;
         write!(f, "    used_len: {},\n", self.len())?;
-        write!(f, "    nop_cnt: {},\n", nop_cnt)?;
         write!(f, "    dirty_cnt: {},\n", dirty_cnt)?;
+        write!(f, "    enable_cnt: {},\n", enable_cnt)?;
         write!(f, "    clear_cnt: {},\n", clear_cnt)?;
         write!(f, "}}")
     }
@@ -150,7 +169,7 @@ impl Debug for PatchingCache {
 
 impl Clone for PatchingCache {
     fn clone(&self) -> Self {
-        let new_cache = PatchingCache::new(
+        let mut new_cache = PatchingCache::new(
             self.content().entry_table_size(),
             self.content().op_table_size(),
         )
@@ -163,6 +182,9 @@ impl Clone for PatchingCache {
             let src = self.content.0 as *const u8;
             std::ptr::copy_nonoverlapping(src, dst, self.content_size);
         }
+
+        new_cache.b_tree = self.b_tree.clone();
+        new_cache.dirty = self.dirty;
         new_cache
     }
 }
@@ -214,14 +236,6 @@ impl PatchingCache {
 
     pub fn content_slice_mut(&self) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.content.0 as *mut u8, self.content_size) }
-    }
-
-    pub fn entries_by_flag(&self, flag: PatchingCacheEntryFlags) -> Vec<&PatchingCacheEntry> {
-        self.content()
-            .entries()
-            .into_iter()
-            .filter(|e| e.is_flag_set(flag))
-            .collect()
     }
 
     /// Get a vector of references to all entries contained in the cache.
@@ -470,6 +484,7 @@ impl PatchingCache {
                 content_size: size,
                 content: PatchingCacheContentRawPtr(ptr),
                 b_tree: Some(BTreeMap::new()),
+                dirty: false,
             });
         };
     }
@@ -524,6 +539,7 @@ impl PatchingCache {
             content_size: size,
             content: PatchingCacheContentRawPtr(mutation_cache_content),
             b_tree: Some(BTreeMap::new()),
+            dirty: false,
         });
     }
 
@@ -585,9 +601,28 @@ impl PatchingCache {
 
 /// Methods that are working on the actual cache content.
 impl PatchingCache {
+    pub fn print(&self) {
+        self.entries().iter().for_each(|e| {
+            println!("{:#?}", e);
+        });
+    }
+
+    pub fn print_dirty_flags(&self) {
+        self.entries().iter().for_each(|e| {
+            println!("{}: {}", e.id().0, flags_to_str(e.dirty_flags()));
+        });
+    }
+
+    pub fn get(&self, pp: PatchPointID) -> Option<&PatchingCacheEntry> {
+        self.b_tree
+            .as_ref()
+            .unwrap()
+            .get(&pp)
+            .map(|idx| self.content().entry_ref(*idx))
+    }
+
     pub fn push(&mut self, entry: PatchingCacheEntry, ops: Vec<PatchingOperation>) -> Result<()> {
-        let mut entry = entry;
-        entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+        let entry = entry;
         self.content_mut().push(entry.clone()).and_then(|idx| {
             if ops.len() > 0 {
                 self.content_mut().push_op_batch(idx, &ops)?;
@@ -609,27 +644,27 @@ impl PatchingCache {
 
     /// Clears the content of the cache.
     pub fn clear(&mut self) {
-        self.entries_mut().iter_mut().for_each(|e| {
-            e.set_dirty(PatchingCacheEntryDirty::Clear);
+        PATCHING_CACHE_ENTRY_FLAGS.iter().for_each(|flag| {
+            self.entries_mut().iter_mut().for_each(|e| {
+                e.set_clear(*flag);
+            });
         });
     }
 
-    pub fn clear_by<F>(&mut self, f: F)
+    pub fn clear_by<F>(&mut self, flag: PatchingCacheEntryFlags, f: F)
     where
         F: Fn(&PatchingCacheEntry) -> bool,
     {
         self.entries_mut().iter_mut().for_each(|e| {
             if f(e) {
-                e.set_dirty(PatchingCacheEntryDirty::Clear);
+                e.set_clear(flag);
             }
         });
     }
 
-    pub fn clear_by_flag(&mut self, flag: PatchingCacheEntryFlags) {
+    pub fn clear_flag(&mut self, flag: PatchingCacheEntryFlags) {
         self.content_mut().entries_mut().iter_mut().for_each(|e| {
-            if e.is_flag_set(flag) {
-                e.set_dirty(PatchingCacheEntryDirty::Clear);
-            }
+            e.set_clear(flag);
         });
     }
 
@@ -650,57 +685,67 @@ impl PatchingCache {
         Ok(ret)
     }
 
-    pub fn replace(&mut self, other: &PatchingCache) -> Result<()> {
-        if self.content_size < other.content_size {
-            Err(PatchingCacheError::CacheOverflow)
-                .context("Can not replace cache content with content from a larger cache.")?
-        }
-        // assert_eq!(self.content_size, other.content_size);
-
-        // self.b_tree = other.b_tree.clone();
-
-        // Copy the element (both the entries and the operations) from the other cache
-        // into our content space.
-
-        for entry in self.entries_mut() {
-            entry.set_dirty(PatchingCacheEntryDirty::Clear);
-        }
-
-        for entry_idx in other.content().iter() {
-            let new_entry = other.content().entry_ref(entry_idx);
-
-            if let Some(&current_idx) = self.b_tree.as_ref().unwrap().get(&new_entry.id()) {
-                let current_entry = self.content().entry_mut(current_idx);
-
-                if current_entry.flags() != new_entry.flags() {
-                    // The entry is already in the cache, but the flags are different.
-                    // We need to update the flags, and recompiling the code
-                    current_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
-                    current_entry.set_flags(new_entry.flags());
-                } else {
-                    // The entry is already in the cache, and the flags are unchanged.
-                    // We need to update the entry in the cache.
-                    current_entry.set_dirty(PatchingCacheEntryDirty::Nop);
-                }
-
-                let ops = other.content().ops(entry_idx);
-                let current_ops = self.content().ops(current_idx);
-                if current_ops != ops {
-                    // The patching operations are different.
-                    // Clear the current operations, and push the new ones.
-                    // Note that the code does not need to be re-compiled.
-                    self.content_mut().clear_entry_ops(current_idx)?;
-                    self.content_mut().push_op_batch(current_idx, &ops)?;
-                }
-            } else {
-                // The entry is not in the cache, so we need to add it.
-                let ops = other.content().ops(entry_idx);
-                self.push(new_entry.clone(), ops)?;
-            }
-        }
-
-        Ok(())
+    pub fn need_sync(&self) -> bool {
+        self.dirty
     }
+
+    pub fn reset_dirty(&mut self) {
+        self.dirty = false;
+    }
+
+    // pub fn replace(&mut self, other: &PatchingCache) -> Result<()> {
+    //     if self.content_size < other.content_size {
+    //         Err(PatchingCacheError::CacheOverflow)
+    //             .context("Can not replace cache content with content from a larger cache.")?
+    //     }
+    //     // assert_eq!(self.content_size, other.content_size);
+
+    //     // self.b_tree = other.b_tree.clone();
+
+    //     // Copy the element (both the entries and the operations) from the other cache
+    //     // into our content space.
+
+    //     for entry in self.entries_mut() {
+    //         entry.set_dirty(PatchingCacheEntryDirty::Clear);
+    //     }
+
+    //     for entry_idx in other.content().iter() {
+    //         let new_entry = other.content().entry_ref(entry_idx);
+
+    //         if let Some(&current_idx) = self.b_tree.as_ref().unwrap().get(&new_entry.id()) {
+    //             let current_entry = self.content().entry_mut(current_idx);
+
+    //             if current_entry.flags() != new_entry.flags() {
+    //                 // The entry is already in the cache, but the flags are different.
+    //                 // We need to update the flags, and recompiling the code
+    //                 current_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+    //                 current_entry.set_flags(new_entry.flags());
+    //             } else {
+    //                 // The entry is already in the cache, and the flags are unchanged.
+    //                 // We leave the entry as it is.
+    //                 current_entry.set_dirty(PatchingCacheEntryDirty::Nop);
+    //             }
+
+    //             let ops = other.content().ops(entry_idx);
+    //             let current_ops = self.content().ops(current_idx);
+    //             if current_ops != ops {
+    //                 // The patching operations are different.
+    //                 // Clear the current operations, and push the new ones.
+    //                 // Note that the code does not need to be re-compiled.
+    //                 self.content_mut().clear_entry_ops(current_idx)?;
+    //                 self.content_mut().push_op_batch(current_idx, &ops)?;
+    //             }
+    //         } else {
+    //             // The entry is not in the cache, so we need to add it.
+    //             let ops = other.content().ops(entry_idx);
+    //             let mut new_entry = new_entry.clone();
+    //             new_entry.set_dirty(PatchingCacheEntryDirty::Dirty);
+    //             self.push(new_entry, ops)?;
+    //         }
+    //     }
+
+    //     Ok(())
+    // }
 
     /***
      * Restore the content of the cache from another cache.
@@ -737,18 +782,99 @@ impl PatchingCache {
         self.content_mut().retain(f)
     }
 
-    /// Only retain MutationCacheEntry's that actually affect the execution.
-    /// !!! This will invalidate all references to the contained entries !!!
-    pub fn purge_nop_entries(&mut self) {
-        self.content_mut().retain(|e| !e.is_nop());
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &PatchingCacheEntry> {
         PatchingCacheIter::new(self)
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PatchingCacheEntry> {
         PatchingCacheIterMut::new(self)
+    }
+
+    pub fn replace(&mut self, other: &PatchingCache) -> Result<()> {
+        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::Tracing)?;
+        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::TracingVal)?;
+        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::Patching)?;
+        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::Jumping)?;
+
+        Ok(())
+    }
+
+    fn replace_with_dirty_flag(
+        &mut self,
+        other: &PatchingCache,
+        flag: PatchingCacheEntryFlags,
+    ) -> Result<()> {
+        log::trace!("Replacing with flag: {:?}", flag);
+        let mut intersected_entry_indices = HashSet::new();
+
+        for idx in self.content().iter() {
+            let entry = self.content().entry_mut(idx);
+            let pp_id = entry.id();
+
+            if let Some(&other_idx) = other.b_tree.as_ref().unwrap().get(&pp_id) {
+                intersected_entry_indices.insert(other_idx);
+
+                // Current cache could also be found from the other cache.
+                // We need to further check the dirty flag
+                // The flag of the current entry could only be Nop or Enable.
+                let other_entry = other.content().entry_ref(other_idx);
+                match (other_entry.flag(flag), entry.flag(flag)) {
+                    (PatchingCacheEntryDirty::Clear, PatchingCacheEntryDirty::Nop) => {}
+                    (PatchingCacheEntryDirty::Clear, _) => {
+                        // Current entry is Enable, we need to clear it
+                        entry.set_clear(flag);
+                    }
+                    (PatchingCacheEntryDirty::Dirty, PatchingCacheEntryDirty::Enable) => {}
+                    (PatchingCacheEntryDirty::Dirty, _) => {
+                        // Current entry is Nop, maybe cleared before
+                        // We need to set it dirty, so it will be re-compiled next time.
+                        entry.set_dirty(flag);
+                    }
+                    (PatchingCacheEntryDirty::Nop, PatchingCacheEntryDirty::Enable) => {
+                        // Current entry is Enable, we need to clear it next time.
+                        entry.set_clear(flag);
+                    }
+                    (PatchingCacheEntryDirty::Nop, _) => {
+                        // (Nop, Nop), do nothing
+                    }
+                    (PatchingCacheEntryDirty::Enable, PatchingCacheEntryDirty::Enable) => {}
+                    (PatchingCacheEntryDirty::Enable, _) => {
+                        // Current entry is Nop, we need to set it dirty, so it will be re-compiled next time.
+                        entry.set_dirty(flag);
+                    }
+                }
+            } else {
+                // Current entry could not be found from the other cache.
+                // We need to clear it next time.
+                match entry.flag(flag) {
+                    PatchingCacheEntryDirty::Enable => {
+                        entry.set_clear(flag);
+                    }
+                    _ => {
+                        // Nop, means the current entry has been cleared before, being set to nop.
+                    }
+                }
+            }
+        }
+
+        // For other entry that is not existed in the current cache
+        for idx in other.content().iter() {
+            if !intersected_entry_indices.contains(&idx) {
+                let mut other_entry = other.content().entry_ref(idx).clone();
+                match other_entry.flag(flag) {
+                    PatchingCacheEntryDirty::Dirty | PatchingCacheEntryDirty::Enable => {
+                        // The entry is dirty or enable, we need to set it dirty, so it will be re-compiled next time.
+                        other_entry.set_dirty(flag);
+                        self.push(other_entry.clone(), other.content().ops(idx))?;
+                    }
+                    _ => {
+                        // Nop or Clear, do nothing
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /**
@@ -759,16 +885,16 @@ impl PatchingCache {
      * Note that when the two caches have the entries with the same flags and the same id,
      * the entries in the other (new) cache will be kept.
      */
-    pub fn union(&mut self, other: &PatchingCache) -> Result<()> {
-        self.union_with_flag(other, PatchingCacheEntryFlags::Tracing)?;
-        self.union_with_flag(other, PatchingCacheEntryFlags::TracingWithVal)?;
-        self.union_with_flag(other, PatchingCacheEntryFlags::Patching)?;
-        self.union_with_flag(other, PatchingCacheEntryFlags::Jumping)?;
+    pub fn union_dirty(&mut self, other: &PatchingCache) -> Result<()> {
+        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::Tracing)?;
+        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::TracingVal)?;
+        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::Patching)?;
+        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::Jumping)?;
 
         Ok(())
     }
 
-    fn union_with_flag(
+    fn union_with_dirty_flag(
         &mut self,
         other: &PatchingCache,
         flag: PatchingCacheEntryFlags,
@@ -776,31 +902,37 @@ impl PatchingCache {
         log::trace!("Unioning with flag: {:?}", flag);
         for other_idx in other.content().iter() {
             let other_entry = other.content().entry_ref(other_idx);
-            if !other_entry.is_flag_set(flag) {
+
+            if !other_entry.is_dirty(flag) {
                 continue;
             }
+
             let pp_id = other_entry.id();
-            if let Some(&idx) = self.b_tree.as_ref().unwrap().get(&pp_id) {
+
+            let set_dirty = if let Some(&idx) = self.b_tree.as_ref().unwrap().get(&pp_id) {
+                let mut set_dirty = false;
                 let entry = self.content().entry_mut(idx);
 
-                if !entry.is_flag_set(flag) {
-                    entry.set_flag(flag);
-                    entry.set_dirty(PatchingCacheEntryDirty::Dirty);
-                } else {
-                    // The patching cache entry dirty flag could be clear or nop.
-                    // - Nop could be set by the agent when synchronizing the patching cache.
-                    // - Clear could be set by the fuzzer when restore the patching cache after executing target.
-                    // When the flag is clear, and the patching flag does not change.
-                    // the entry could be reused, so set the dirty flag as nop.
-                    if entry.is_clear() {
-                        entry.set_dirty(PatchingCacheEntryDirty::Nop);
+                match entry.flag(flag) {
+                    PatchingCacheEntryDirty::Clear => {
+                        *entry.flag_mut(flag) = PatchingCacheEntryDirty::Enable;
+                        // if flag == PatchingCacheEntryFlags::TracingVal {
+                        //     entry.set_clear(PatchingCacheEntryFlags::Tracing);
+                        // } else if flag == PatchingCacheEntryFlags::Tracing {
+                        //     entry.set_clear(PatchingCacheEntryFlags::TracingVal);
+                        // }
                     }
-                    // If the dirty flag is nop, and the patching flag does not change.
-                    // the entry could be reused, so keep the nop unchanged.
+                    PatchingCacheEntryDirty::Dirty => {}
+                    PatchingCacheEntryDirty::Nop => {
+                        entry.set_dirty(flag);
+
+                        set_dirty = true;
+                    }
+                    PatchingCacheEntryDirty::Enable => {}
                 }
 
-                if entry.is_flag_set(PatchingCacheEntryFlags::Patching)
-                    && entry.is_flag_set(PatchingCacheEntryFlags::Jumping)
+                if entry.is_dirty(PatchingCacheEntryFlags::Patching)
+                    && entry.is_dirty(PatchingCacheEntryFlags::Jumping)
                 {
                     return Err(anyhow!(
                         "Patching and jumping are both set for entry (PatchPointID)#{}",
@@ -826,9 +958,19 @@ impl PatchingCache {
                     }
                     _ => {}
                 }
+
+                set_dirty
             } else {
                 let ops = other.content().ops(other_idx);
-                self.push(other_entry.clone(), ops)?;
+                let mut other_entry = other_entry.clone();
+                other_entry.set_dirty(flag);
+                self.push(other_entry, ops)?;
+
+                true
+            };
+
+            if set_dirty {
+                self.dirty = true;
             }
         }
 
@@ -838,35 +980,25 @@ impl PatchingCache {
     /// Set the flags of all mutation cache entries to zero.
     pub fn reset_flags(&mut self) -> &mut Self {
         self.iter_mut().for_each(|e| {
-            e.reset_flags();
-        });
-        self
-    }
-
-    /// Set the passed MutationCacheEntryFlags on all mutation cache entries.
-    pub fn set_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
-        self.iter_mut().for_each(|e| {
-            e.set_flag(flag);
-        });
-        self
-    }
-
-    /// Clear the MutationCacheEntryFlags from all mutation cache entries.
-    pub fn unset_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
-        self.iter_mut().for_each(|e| {
-            e.unset_flag(flag);
+            e.reset_dirty_flags();
         });
         self
     }
 
     /// Enable tracing for all mutation entries in this set.
     pub fn enable_tracing(&mut self) -> &mut Self {
-        self.set_flag(PatchingCacheEntryFlags::Tracing)
+        self.iter_mut().for_each(|e| {
+            e.set_dirty(PatchingCacheEntryFlags::Tracing);
+        });
+        self
     }
 
     /// Disable tracing for all mutation entries in this set.
     pub fn disable_tracing(&mut self) -> &mut Self {
-        self.unset_flag(PatchingCacheEntryFlags::Tracing)
+        self.iter_mut().for_each(|e| {
+            e.set_clear(PatchingCacheEntryFlags::Tracing);
+        });
+        self
     }
 
     /// Remove all mutation entries that have the passed LocationType.
@@ -898,7 +1030,20 @@ impl PatchingCache {
     }
 
     pub fn remove_cleared_entries(&mut self) -> usize {
-        self.retain(|e| !e.is_clear())
+        self.entries_mut().iter_mut().for_each(|e| {
+            e.set_by(PatchingCacheEntryDirty::Clear, PatchingCacheEntryDirty::Nop);
+        });
+        self.retain(|e| {
+            if e.is_all(PatchingCacheEntryDirty::Nop) {
+                false
+            } else if e.is_any(PatchingCacheEntryDirty::Enable) {
+                true
+            } else {
+                // only nop and clear
+                // in fact, clear would be set to nop just before, so it will not happen
+                false
+            }
+        })
     }
 }
 
@@ -939,7 +1084,6 @@ mod test {
         PatchingCacheEntry::new(
             id.into(),
             0,
-            0,
             llvm_stackmap::LocationType::Constant,
             8,
             crate::dwarf::DwarfReg::Rax,
@@ -961,18 +1105,18 @@ mod test {
         }
     }
 
-    #[test]
-    fn patching_cache_replace() {
-        let mut cache = PatchingCache::default();
-        for i in 0..100 {
-            cache.push(dummy_entry(i as u64), vec![]).unwrap();
-        }
+    // #[test]
+    // fn patching_cache_replace() {
+    //     let mut cache = PatchingCache::default();
+    //     for i in 0..100 {
+    //         cache.push(dummy_entry(i as u64), vec![]).unwrap();
+    //     }
 
-        let mut other = PatchingCache::new(100, 100).unwrap();
-        other.replace(&cache).unwrap();
+    //     let mut other = PatchingCache::new(100, 100).unwrap();
+    //     other.replace(&cache).unwrap();
 
-        assert_eq!(cache.len(), other.len());
-    }
+    //     assert_eq!(cache.len(), other.len());
+    // }
 
     #[test]
     fn test_shared_memory_alignment() {

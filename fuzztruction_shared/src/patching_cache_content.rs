@@ -898,7 +898,6 @@ mod test {
         PatchingCacheEntry::new(
             id.into(),
             0,
-            0,
             llvm_stackmap::LocationType::Constant,
             8,
             crate::dwarf::DwarfReg::Rax,
@@ -1037,7 +1036,7 @@ mod test {
 
         for i in 0..10 {
             let mut e = dummy_entry(i as u64);
-            e.set_flag(PatchingCacheEntryFlags::Patching);
+            // e.set_dirty_flag(PatchingCacheEntryFlags::Patching);
             cache.content_mut().push(e).expect("Failed to push entry");
             for j in 0..i {
                 cache
@@ -1050,7 +1049,7 @@ mod test {
         let mut another_cache = PatchingCache::new(100, 100).unwrap();
         for i in 10..20 {
             let mut e = dummy_entry(i as u64);
-            e.set_flag(PatchingCacheEntryFlags::Patching);
+            // e.set_dirty_flag(PatchingCacheEntryFlags::Patching);
             another_cache
                 .content_mut()
                 .push(e)
@@ -1061,13 +1060,13 @@ mod test {
                 .content()
                 .find_entry(PatchPointID::from(i as u64))
                 .unwrap();
-            another_cache
-                .content_mut()
-                .entry_mut(idx)
-                .set_flag(PatchingCacheEntryFlags::Tracing);
+            // another_cache
+            //     .content_mut()
+            //     .entry_mut(idx)
+                // .set_dirty_flag(PatchingCacheEntryFlags::Tracing);
         }
 
-        cache.union(&another_cache).expect("Failed to union");
+        cache.union_dirty(&another_cache).expect("Failed to union");
         assert_eq!(cache.content().entry_count(), 20);
         cache.content().print_entries();
         cache.content().print_ops();

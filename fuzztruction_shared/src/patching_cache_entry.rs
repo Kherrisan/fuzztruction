@@ -1,10 +1,12 @@
 use llvm_stackmap::LocationType;
 use memoffset::offset_of;
+use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
+use strum_macros::{Display, EnumString};
 
 use crate::{
     dwarf::{self, DwarfReg},
-    patching_cache::PatchingCacheEntryFlags,
+    patching_cache::{PATCHING_CACHE_ENTRY_FLAGS, PatchingCacheEntryFlags},
     patchpoint::PatchPoint,
     types::PatchPointID,
     util,
@@ -55,7 +57,11 @@ pub struct PatchingOperation {
 
 impl std::fmt::Debug for PatchingOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PatchingOperation {{ op: {:?}, operand: 0x{:x} }}", self.op, self.operand)
+        write!(
+            f,
+            "PatchingOperation {{ op: {:?}, operand: 0x{:x} }}",
+            self.op, self.operand
+        )
     }
 }
 
@@ -77,12 +83,25 @@ impl PatchingOperation {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[repr(u8)]
+#[derive(
+    Clone,
+    Serialize,
+    Deserialize,
+    Hash,
+    PartialEq,
+    Eq,
+    Display,
+    EnumString,
+    Debug,
+    IntoPrimitive,
+    Copy,
+)]
 pub enum PatchingCacheEntryDirty {
     Nop = 0,
     Dirty = 1,
     Clear = 2,
+    Enable = 3,
 }
 
 #[repr(C)]
@@ -94,9 +113,8 @@ pub struct PatchingCacheEntryMetadata {
     id: PatchPointID,
 
     vma: u64,
-    flags: u8,
 
-    dirty: PatchingCacheEntryDirty,
+    dirty: [PatchingCacheEntryDirty; 4],
 
     pub loc_type: llvm_stackmap::LocationType,
     pub loc_size: u16,
@@ -109,21 +127,17 @@ pub struct PatchingCacheEntryMetadata {
     pub op_idx: Option<usize>,
 }
 
-fn flags_to_str(flags: u8) -> String {
-    let mut s = vec![];
-    if flags & PatchingCacheEntryFlags::Tracing as u8 > 0 {
-        s.push("Tracing");
-    }
-    if flags & PatchingCacheEntryFlags::TracingWithVal as u8 > 0 {
-        s.push("TracingWithVal");
-    }
-    if flags & PatchingCacheEntryFlags::Patching as u8 > 0 {
-        s.push("Patching");
-    }
-    if flags & PatchingCacheEntryFlags::Jumping as u8 > 0 {
-        s.push("Jumping");
-    }
-    s.join(" | ")
+pub fn flags_to_str(flags: &[PatchingCacheEntryDirty; 4]) -> String {
+    [
+        PatchingCacheEntryFlags::Tracing,
+        PatchingCacheEntryFlags::TracingVal,
+        PatchingCacheEntryFlags::Patching,
+        PatchingCacheEntryFlags::Jumping,
+    ]
+    .into_iter()
+    .map(|f| format!("{} = {}", f, flags[f as usize]))
+    .collect::<Vec<_>>()
+    .join(" | ")
 }
 
 impl std::fmt::Debug for PatchingCacheEntryMetadata {
@@ -131,7 +145,7 @@ impl std::fmt::Debug for PatchingCacheEntryMetadata {
         f.debug_struct("PatchingCacheEntryMetadata")
             .field("id", &self.id)
             .field("vma", &format!("0x{:x}", self.vma))
-            .field("flags", &flags_to_str(self.flags))
+            .field("flags", &flags_to_str(&self.dirty))
             .field("loc_type", &self.loc_type)
             .field("loc_size", &self.loc_size)
             .field("dwarf_regnum", &self.dwarf_regnum)
@@ -166,7 +180,6 @@ impl PatchingCacheEntry {
     pub fn new(
         id: PatchPointID,
         vma: u64,
-        flags: u8,
         loc_type: llvm_stackmap::LocationType,
         loc_size: u16,
         dwarf_regnum: dwarf::DwarfReg,
@@ -176,8 +189,7 @@ impl PatchingCacheEntry {
         let metadata = PatchingCacheEntryMetadata {
             id,
             vma,
-            flags,
-            dirty: PatchingCacheEntryDirty::Nop,
+            dirty: [PatchingCacheEntryDirty::Nop; 4],
             loc_type,
             loc_size,
             dwarf_regnum,
@@ -287,59 +299,46 @@ impl PatchingCacheEntry {
         self.metadata.op_idx
     }
 
-    pub fn reset_flags(&mut self) -> &mut Self {
-        self.metadata.flags = 0;
+    pub fn reset_dirty_flags(&mut self) -> &mut Self {
+        self.metadata.dirty = [PatchingCacheEntryDirty::Nop; 4];
         self
     }
 
-    pub fn enable_tracing_with_val(&mut self) -> &mut Self {
-        self.set_flag(PatchingCacheEntryFlags::TracingWithVal)
+    pub fn flag(&self, flag: PatchingCacheEntryFlags) -> PatchingCacheEntryDirty {
+        self.metadata.dirty[flag as usize]
     }
 
-    pub fn disable_tracing_with_val(&mut self) -> &mut Self {
-        self.unset_flag(PatchingCacheEntryFlags::TracingWithVal)
+    pub fn flag_mut(&mut self, flag: PatchingCacheEntryFlags) -> &mut PatchingCacheEntryDirty {
+        &mut self.metadata.dirty[flag as usize]
     }
 
-    pub fn enable_tracing(&mut self) -> &mut Self {
-        self.set_flag(PatchingCacheEntryFlags::Tracing)
-    }
-
-    pub fn disable_tracing(&mut self) -> &mut Self {
-        self.unset_flag(PatchingCacheEntryFlags::Tracing)
-    }
-
-    pub fn enable_patching(&mut self) -> &mut Self {
-        self.set_flag(PatchingCacheEntryFlags::Patching)
-    }
-
-    pub fn disable_patching(&mut self) -> &mut Self {
-        self.unset_flag(PatchingCacheEntryFlags::Patching)
-    }
-
-    pub fn set_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
-        self.metadata.flags |= flag as u8;
+    pub fn set_dirty_flag(
+        &mut self,
+        flag: PatchingCacheEntryFlags,
+        dirty: PatchingCacheEntryDirty,
+    ) -> &mut Self {
+        self.metadata.dirty[flag as usize] = dirty;
         self
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.metadata.flags == 0
+    pub fn dirty_flags(&self) -> &[PatchingCacheEntryDirty; 4] {
+        &self.metadata.dirty
     }
 
-    pub fn flags(&self) -> u8 {
-        self.metadata.flags
+    pub fn dirty_flags_mut(&mut self) -> &mut [PatchingCacheEntryDirty; 4] {
+        &mut self.metadata.dirty
     }
 
-    pub fn set_flags(&mut self, val: u8) {
-        self.metadata.flags = val;
+    pub fn set_dirty_flags(&mut self, dirty: [PatchingCacheEntryDirty; 4]) {
+        self.metadata.dirty = dirty;
     }
 
-    pub fn unset_flag(&mut self, flag: PatchingCacheEntryFlags) -> &mut Self {
-        self.metadata.flags &= !(flag as u8);
-        self
-    }
-
-    pub fn is_flag_set(&self, flag: PatchingCacheEntryFlags) -> bool {
-        (self.metadata.flags & flag as u8) > 0
+    pub fn is_flag_set(
+        &self,
+        flag: PatchingCacheEntryFlags,
+        dirty: PatchingCacheEntryDirty,
+    ) -> bool {
+        self.metadata.dirty[flag as usize] == dirty
     }
 
     /// The size in bytes of the whole entry. Cloning a MutationCacheEntry requires
@@ -362,20 +361,52 @@ impl PatchingCacheEntry {
         &mut *ptr
     }
 
-    pub fn is_nop(&self) -> bool {
-        self.op_head_idx.is_none()
+    pub fn set_dirty(&mut self, flag: PatchingCacheEntryFlags) {
+        self.metadata.dirty[flag as usize] = PatchingCacheEntryDirty::Dirty;
     }
 
-    pub fn set_dirty(&mut self, dirty: PatchingCacheEntryDirty) {
-        self.metadata.dirty = dirty;
+    pub fn set_dirty_to_enable(&mut self) {
+        PATCHING_CACHE_ENTRY_FLAGS.iter().for_each(|f| {
+            if self.metadata.dirty[*f as usize] == PatchingCacheEntryDirty::Dirty {
+                self.metadata.dirty[*f as usize] = PatchingCacheEntryDirty::Enable;
+            }
+        });
     }
 
-    pub fn is_dirty(&self) -> bool {
-        self.metadata.dirty == PatchingCacheEntryDirty::Dirty
+    pub fn set_by(&mut self, cond: PatchingCacheEntryDirty, dirty: PatchingCacheEntryDirty) {
+        PATCHING_CACHE_ENTRY_FLAGS.iter().for_each(|f| {
+            if self.metadata.dirty[*f as usize] == cond {
+                self.metadata.dirty[*f as usize] = dirty;
+            }
+        });
     }
 
-    pub fn is_clear(&self) -> bool {
-        self.metadata.dirty == PatchingCacheEntryDirty::Clear
+    pub fn is_any(&self, dirty: PatchingCacheEntryDirty) -> bool {
+        self.metadata.dirty.iter().any(|d| *d == dirty)
+    }
+
+    pub fn is_all(&self, dirty: PatchingCacheEntryDirty) -> bool {
+        self.metadata.dirty.iter().all(|d| *d == dirty)
+    }
+
+    pub fn is_dirty(&self, flag: PatchingCacheEntryFlags) -> bool {
+        self.metadata.dirty[flag as usize] == PatchingCacheEntryDirty::Dirty
+    }
+
+    pub fn is_enable(&self, flag: PatchingCacheEntryFlags) -> bool {
+        self.metadata.dirty[flag as usize] == PatchingCacheEntryDirty::Enable
+    }
+
+    pub fn is_nop(&self, flag: PatchingCacheEntryFlags) -> bool {
+        self.metadata.dirty[flag as usize] == PatchingCacheEntryDirty::Nop
+    }
+
+    pub fn set_clear(&mut self, flag: PatchingCacheEntryFlags) {
+        self.metadata.dirty[flag as usize] = PatchingCacheEntryDirty::Clear;
+    }
+
+    pub fn is_clear(&self, flag: PatchingCacheEntryFlags) -> bool {
+        self.metadata.dirty[flag as usize] == PatchingCacheEntryDirty::Clear
     }
 }
 
@@ -385,7 +416,6 @@ impl From<&PatchPoint> for PatchingCacheEntry {
         PatchingCacheEntry::new(
             pp.id(),
             pp.vma(),
-            0,
             loc.loc_type,
             loc.loc_size,
             DwarfReg::try_from(loc.dwarf_regnum).unwrap(),
