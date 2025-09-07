@@ -805,14 +805,16 @@ impl PatchingCache {
         flag: PatchingCacheEntryFlags,
     ) -> Result<()> {
         log::trace!("Replacing with flag: {:?}", flag);
-        let mut intersected_entry_indices = HashSet::new();
+        // let mut intersected_entry_indices = HashSet::new();
+        let mut other_pp_ids = other.content().iter().collect::<HashSet<_>>();
 
         for idx in self.content().iter() {
             let entry = self.content().entry_mut(idx);
             let pp_id = entry.id();
 
             if let Some(&other_idx) = other.b_tree.as_ref().unwrap().get(&pp_id) {
-                intersected_entry_indices.insert(other_idx);
+                // intersected_entry_indices.insert(other_idx);
+                other_pp_ids.remove(&other_idx);
 
                 // Current cache could also be found from the other cache.
                 // We need to further check the dirty flag
@@ -858,18 +860,16 @@ impl PatchingCache {
         }
 
         // For other entry that is not existed in the current cache
-        for idx in other.content().iter() {
-            if !intersected_entry_indices.contains(&idx) {
-                let mut other_entry = other.content().entry_ref(idx).clone();
-                match other_entry.flag(flag) {
-                    PatchingCacheEntryDirty::Dirty | PatchingCacheEntryDirty::Enable => {
-                        // The entry is dirty or enable, we need to set it dirty, so it will be re-compiled next time.
-                        other_entry.set_dirty(flag);
-                        self.push(other_entry.clone(), other.content().ops(idx))?;
-                    }
-                    _ => {
-                        // Nop or Clear, do nothing
-                    }
+        for idx in other_pp_ids {
+            let mut other_entry = other.content().entry_ref(idx).clone();
+            match other_entry.flag(flag) {
+                PatchingCacheEntryDirty::Dirty | PatchingCacheEntryDirty::Enable => {
+                    // The entry is dirty or enable, we need to set it dirty, so it will be re-compiled next time.
+                    other_entry.set_dirty(flag);
+                    self.push(other_entry.clone(), other.content().ops(idx))?;
+                }
+                _ => {
+                    // Nop or Clear, do nothing
                 }
             }
         }
