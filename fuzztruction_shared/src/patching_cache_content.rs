@@ -1066,7 +1066,7 @@ mod test {
                 // .set_dirty_flag(PatchingCacheEntryFlags::Tracing);
         }
 
-        cache.union_dirty(&another_cache).expect("Failed to union");
+        cache.union(&another_cache).expect("Failed to union");
         assert_eq!(cache.content().entry_count(), 20);
         cache.content().print_entries();
         cache.content().print_ops();
