@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use libc::PTRACE_DETACH;
 use llvm_stackmap::LocationType;
 use log::*;
 
@@ -16,7 +15,7 @@ use anyhow::anyhow;
 use num_enum::IntoPrimitive;
 use shared_memory::ShmemError;
 use std::alloc;
-use strum::{Display, EnumString};
+use strum_macros::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 
 use crate::{
@@ -36,7 +35,7 @@ pub const PATCHING_CACHE_DEFAULT_ENTRY_SIZE: usize = 400000;
 pub const PATCHING_CACHE_DEFAULT_OP_SIZE: usize = 100000;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, IntoPrimitive, EnumString, Display,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, IntoPrimitive, EnumString, AsRefStr, Display,
 )]
 #[repr(u8)]
 pub enum PatchingCacheEntryFlags {

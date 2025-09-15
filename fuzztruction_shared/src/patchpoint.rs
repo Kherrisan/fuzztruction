@@ -7,8 +7,6 @@ use std::{
 use crate::{
     constants::PATCH_POINT_SIZE,
     func::FunctionId,
-    patching_cache::PatchingCacheEntryFlags,
-    patching_cache_entry::PatchingCacheEntry,
     types::PatchPointID,
     var::{VarDeclRef, VarType},
 };
@@ -74,6 +72,14 @@ pub enum StateVarType {
     Ret,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PatchpointType {
+    ENTRY,
+    RET,
+    VALUE,
+    TRAMPOLINE,
+}
+
 /// Static information about an llvm patch point.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PatchPointIR {
@@ -89,10 +95,10 @@ pub struct PatchPointIR {
     pub function: String,
     pub func_idx: u32,
     pub ins: LLVMInstruction,
+    pub pp_type: PatchpointType,
     pub var: Option<VarDeclRef>,
     pub method: InstrumentMethod,
     #[serde(skip)]
-    pub is_func_entry: bool,
     pub detail: String,
     pub bb_name: String,
 }
@@ -110,6 +116,14 @@ impl PatchPointIR {
 
     pub fn function_id(&self) -> FunctionId {
         (&self.function).into()
+    }
+
+    pub fn is_func_entry(&self) -> bool {
+        self.pp_type == PatchpointType::ENTRY
+    }
+
+    pub fn is_func_exit(&self) -> bool {
+        self.pp_type == PatchpointType::RET
     }
 }
 

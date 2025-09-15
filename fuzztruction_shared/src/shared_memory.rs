@@ -1,8 +1,8 @@
-use std::{env, ffi::CString, ops::{Deref, DerefMut}, ptr, slice};
+use std::{env, ffi::CString, mem::size_of, ops::{Deref, DerefMut}, ptr, slice};
 use libc::{c_int, munmap, shm_unlink};
 
 use anyhow::{anyhow, Context, Result};
-use rand::Rng;
+use rand::prelude::*;
 
 /// Mmap-based The sharedmap impl for unix using [`shm_open`] and [`mmap`].
 /// Default on `MacOS` and `iOS`, where we need a central point to unmap
@@ -131,7 +131,8 @@ impl MmapShMem {
     }
 
     pub fn new_shmem(map_size: usize, label: &str) -> Result<MmapShMem> {
-        let rnd_suffix: u32 = rand::rng().random_range(0..u32::MAX);
+        let mut rng = rand::rng();
+        let rnd_suffix: u32 = rng.random_range(0..u32::MAX);
         let path = format!("/pingu_{label}_{rnd_suffix}");
         Ok(MmapShMem::new(path, map_size, true)?)
     }

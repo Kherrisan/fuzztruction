@@ -2,7 +2,7 @@ use llvm_stackmap::LocationType;
 use memoffset::offset_of;
 use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
-use strum_macros::{Display, EnumString};
+use strum_macros::{EnumString};
 
 use crate::{
     dwarf::{self, DwarfReg},
@@ -91,7 +91,7 @@ impl PatchingOperation {
     Hash,
     PartialEq,
     Eq,
-    Display,
+    strum_macros::Display,
     EnumString,
     Debug,
     IntoPrimitive,
@@ -135,7 +135,7 @@ pub fn flags_to_str(flags: &[PatchingCacheEntryDirty; 4]) -> String {
         PatchingCacheEntryFlags::Jumping,
     ]
     .into_iter()
-    .map(|f| format!("{} = {}", f, flags[f as usize]))
+    .map(|f| format!("{} = {}", f.to_string(), flags[f as usize].to_string()))
     .collect::<Vec<_>>()
     .join(" | ")
 }
