@@ -176,10 +176,8 @@ pub fn print_fds() {
 }
 
 pub fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
-    let mut file = OpenOptions::new().read(true).open(path)?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let res = serde_json::from_slice(&buf)?;
+    let file = OpenOptions::new().read(true).open(path)?;
+    let res = rmp_serde::decode::from_read(&file)?;
     Ok(res)
 }
 
@@ -189,8 +187,7 @@ pub fn dump_json<T: serde::Serialize>(path: &Path, data: &T) -> anyhow::Result<(
         .create(true)
         .truncate(true)
         .open(path)?;
-    let buf = serde_json::to_vec(data)?;
-    file.write_all(&buf)?;
+    rmp_serde::encode::write(&mut file, data)?;
     Ok(())
 }
 
