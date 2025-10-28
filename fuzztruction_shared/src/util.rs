@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Local};
-use libafl_bolts::rands::Rand;
+use humantime::format_duration;
+use libafl_bolts::{format_duration_hms, rands::Rand};
 use log::log_enabled;
 use nix::sys::signal::Signal;
 use serde::Serialize;

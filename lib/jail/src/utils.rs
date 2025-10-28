@@ -1,5 +1,3 @@
-use std::io::Read as _;
-
 pub fn generate_deterministic_random(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut seed: u64 = 12345;

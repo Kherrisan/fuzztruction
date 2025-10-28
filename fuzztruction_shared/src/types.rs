@@ -1,9 +1,26 @@
 use anyhow::Result;
+
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fmt::{Display, Formatter},
+    sync::Mutex,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+)]
 #[repr(C)]
 pub struct PatchPointID(pub u32);
 
@@ -12,6 +29,12 @@ lazy_static! {
     static ref PATCH_POINT_ID_CTR: Mutex<u32> = Mutex::new(PATCH_POINT_ID_INVALID + 1);
     static ref PATCH_POINT_ID_MAP: Mutex<HashMap<(usize, usize, usize), PatchPointID>> =
         Mutex::new(HashMap::new());
+}
+
+impl Display for PatchPointID {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PatchPointID({})", self.0)
+    }
 }
 
 impl PatchPointID {
@@ -42,12 +65,6 @@ impl PatchPointID {
 
     pub fn invalid() -> PatchPointID {
         PatchPointID(PATCH_POINT_ID_INVALID)
-    }
-}
-
-impl ToString for PatchPointID {
-    fn to_string(&self) -> String {
-        format!("PatchPointID({})", self.0)
     }
 }
 

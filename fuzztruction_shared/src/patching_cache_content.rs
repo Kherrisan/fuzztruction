@@ -1,13 +1,11 @@
-use std::{cell::RefCell, fmt::Debug, mem, rc::Rc};
+use std::{fmt::Debug, mem};
 
 use crate::{
-    patching_cache::{PatchingCache, PatchingCacheEntryFlags},
     patching_cache_entry::{PatchingCacheEntry, PatchingOperation},
     types::PatchPointID,
 };
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 // #[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq, Default)]
 // pub struct PatchingCacheContentPackage {
@@ -246,7 +244,15 @@ impl std::fmt::Debug for PatchingCacheContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PatchingCacheContent {{")?;
         write!(f, "data address: 0x{:x}, ", self.data.as_ptr() as usize)?;
-        write!(f, "total_size: {}, entry_data_offset: {}, op_data_offset: {}, entry_table_size: {}, op_table_size: {}", self.total_size, self.entry_data_offset, self.op_data_offset, self.entry_table_size, self.op_table_size)?;
+        write!(
+            f,
+            "total_size: {}, entry_data_offset: {}, op_data_offset: {}, entry_table_size: {}, op_table_size: {}",
+            self.total_size,
+            self.entry_data_offset,
+            self.op_data_offset,
+            self.entry_table_size,
+            self.op_table_size
+        )?;
         write!(f, " }}")
     }
 }
@@ -368,8 +374,8 @@ impl PatchingCacheContent {
         let entry_align = mem::align_of::<PatchingCacheEntry>();
         let op_align = mem::align_of::<PatchingOperation>();
         let max_align = std::cmp::max(
-            std::cmp::max(entry_align, op_align), 
-            mem::align_of::<PatchingCacheContent>()
+            std::cmp::max(entry_align, op_align),
+            mem::align_of::<PatchingCacheContent>(),
         );
 
         // 基础结构大小（包括 PatchingCacheContent 本身）
@@ -379,7 +385,8 @@ impl PatchingCacheContent {
         let entry_data_offset = (entry_bitmap_len + entry_align - 1) & !(entry_align - 1);
 
         // 计算 op bitmap 偏移
-        let op_bitmap_offset = entry_data_offset + entry_size * mem::size_of::<PatchingCacheEntry>();
+        let op_bitmap_offset =
+            entry_data_offset + entry_size * mem::size_of::<PatchingCacheEntry>();
 
         // 计算 op 数据偏移（考虑对齐）
         let op_data_offset = (op_bitmap_offset + op_bitmap_len + op_align - 1) & !(op_align - 1);
@@ -389,7 +396,7 @@ impl PatchingCacheContent {
 
         // 确保对齐到最大对齐要求（与 shm_open 一致）
         let aligned_size = (total_size + max_align - 1) & !(max_align - 1);
-        
+
         // 确保最小内存大小不小于 PatchingCacheContent 本身的大小
         std::cmp::max(aligned_size, mem::size_of::<Self>())
     }
@@ -733,10 +740,10 @@ impl PatchingCacheContent {
                     current_idx = self.op_ref(idx).next_idx;
                 } else {
                     return Err(anyhow::anyhow!(
-                            "Operation at index {} of patchpoint id {:?} does not exist in the descriptor table",
-                            i,
-                            op_idx
-                        ));
+                        "Operation at index {} of patchpoint id {:?} does not exist in the descriptor table",
+                        i,
+                        op_idx
+                    ));
                 }
             } else {
                 return Err(anyhow::anyhow!(
@@ -1063,7 +1070,7 @@ mod test {
             // another_cache
             //     .content_mut()
             //     .entry_mut(idx)
-                // .set_dirty_flag(PatchingCacheEntryFlags::Tracing);
+            // .set_dirty_flag(PatchingCacheEntryFlags::Tracing);
         }
 
         cache.union(&another_cache).expect("Failed to union");

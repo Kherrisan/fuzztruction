@@ -115,11 +115,7 @@ where
         res
     }
 
-    pub fn choose_random<R: libafl_bolts::rands::Rand>(
-        &self,
-        max: usize,
-        rand: &mut R,
-    ) -> Vec<U> {
+    pub fn choose_random<R: libafl_bolts::rands::Rand>(&self, max: usize, rand: &mut R) -> Vec<U> {
         // 使用 libafl_bolts::rands::Rand 实现从集合中随机选择不超过 max 个元素
         // 1. 收集所有元素
         let mut entries: Vec<U> = self.into();

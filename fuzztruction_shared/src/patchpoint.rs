@@ -1,13 +1,15 @@
 use anyhow::Result;
+
 use std::{
-    assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, hash::Hasher,
-    ops::Range, path::Path,
+    assert_matches::assert_matches, collections::HashMap, fmt::Display, fs::OpenOptions,
+    hash::Hasher, ops::Range, path::Path,
 };
 
 use crate::{
     constants::PATCH_POINT_SIZE,
     func::FunctionId,
     types::PatchPointID,
+    util::{dump_bin, load_bin},
     var::{VarDeclRef, VarType},
 };
 use llvm_stackmap::{LLVMInstruction, LiveOut, Location, LocationType, StackMap};
@@ -70,6 +72,9 @@ pub enum StateVarType {
 
     #[serde(rename = "ret")]
     Ret,
+
+    #[serde(rename = "asan")]
+    Asan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -124,6 +129,32 @@ impl PatchPointIR {
 
     pub fn is_func_exit(&self) -> bool {
         self.pp_type == PatchpointType::RET
+    }
+
+    pub fn display_graph_node(&self, escape: bool) -> String {
+        if let Some(var) = self.var.as_ref() {
+            format!(
+                "{}(#{}){} {}:{}:{}",
+                var.as_string(),
+                self.id,
+                if escape { "\\n" } else { "\n" },
+                self.file,
+                self.line,
+                self.col
+            )
+        } else {
+            format!("#{}", self.id)
+        }
+    }
+}
+
+impl Display for PatchPointIR {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(var) = self.var.as_ref() {
+            write!(f, "{}(#{})", var.as_string(), self.id)
+        } else {
+            write!(f, "#{}", self.id)
+        }
     }
 }
 

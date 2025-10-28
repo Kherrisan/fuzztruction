@@ -13,8 +13,6 @@ use std::ptr;
 use std::slice;
 
 use anyhow::{anyhow, Result};
-use serde::Deserialize;
-use serde::Serialize;
 
 use crate::types::PatchPointID;
 

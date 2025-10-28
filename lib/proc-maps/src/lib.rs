@@ -21,9 +21,8 @@
 //!    println!("Filename {:?} Address {} Size {}", map.filename(), map.start(), map.size());
 //! }
 //! ```
-
-extern crate libc;
 extern crate serde;
+extern crate libc;
 
 #[cfg(target_os = "macos")]
 extern crate anyhow;
