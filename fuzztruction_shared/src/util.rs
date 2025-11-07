@@ -1,13 +1,11 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Local};
-use humantime::format_duration;
-use libafl_bolts::{format_duration_hms, rands::Rand};
+use libafl_bolts::rands::Rand;
 use log::log_enabled;
 use nix::sys::signal::Signal;
 use serde::Serialize;
 use std::{
     alloc,
-    collections::HashMap,
     convert::TryInto,
     fs::{self, OpenOptions, read_link},
     io::{Read, Write},
@@ -178,7 +176,7 @@ pub fn print_fds() {
 
 pub fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let file = OpenOptions::new().read(true).open(path)?;
-    let res = rmp_serde::decode::from_read(&file)?;
+    let res = serde_json::from_reader(&file)?;
     Ok(res)
 }
 
@@ -188,7 +186,7 @@ pub fn dump_json<T: serde::Serialize>(path: &Path, data: &T) -> anyhow::Result<(
         .create(true)
         .truncate(true)
         .open(path)?;
-    rmp_serde::encode::write(&mut file, data)?;
+    serde_json::to_writer(&mut file, data)?;
     Ok(())
 }
 

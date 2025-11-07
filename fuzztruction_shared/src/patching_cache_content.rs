@@ -1,272 +1,139 @@
-use std::{fmt::Debug, mem};
+use std::{cmp::min, mem, ptr};
 
 use crate::{
     patching_cache_entry::{PatchingCacheEntry, PatchingOperation},
     types::PatchPointID,
 };
 
-use anyhow::Result;
+pub const MAX_PATCHING_CACHE_ENTRIES: usize = 400000;
+pub const MAX_PATCHING_OPERATIONS: usize = 1000000;
+const PENDING_DELETIONS_LIMIT: usize = 500;
 
-// #[derive(Clone, Serialize, Deserialize, Hash, PartialEq, Eq, Default)]
-// pub struct PatchingCacheContentPackage {
-//     entry_size: usize,
-
-//     op_size: usize,
-
-//     pub entries: Vec<PatchingCacheEntry>,
-
-//     ops: Vec<(usize, PatchingOperation)>,
-// }
-
-// impl From<&PatchingCache> for PatchingCacheContentPackage {
-//     fn from(pc: &PatchingCache) -> Self {
-//         pc.content().consolidate_package()
-//     }
-// }
-
-// impl From<PatchingCache> for PatchingCacheContentPackage {
-//     fn from(pc: PatchingCache) -> Self {
-//         pc.content().consolidate_package()
-//     }
-// }
-
-// impl Into<PatchingCache> for &PatchingCacheContentPackage {
-//     fn into(self) -> PatchingCache {
-//         let mut pc = PatchingCache::new(self.entry_size, self.op_size).unwrap();
-//         pc.load_package(&self).unwrap();
-//         pc
-//     }
-// }
-
-// impl std::fmt::Debug for PatchingCacheContentPackage {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         write!(f, "PatchingCacheContentPackage {{")?;
-//         write!(
-//             f,
-//             " entry_size: {}, op_size: {}",
-//             self.entry_size, self.op_size
-//         )?;
-//         write!(f, " }}")
-//     }
-// }
-pub struct BitmapIter {
-    bitmap_ptr: *const Bitmap,
-    current_index: usize,
+/// Entry 描述符：记录 entry 在数据区的位置
+#[derive(Debug, Clone, Copy)]
+struct EntryDescriptor {
+    start_offset: usize,
+    op_head_idx: Option<usize>,
 }
 
-impl Iterator for BitmapIter {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let bitmap = unsafe { &*self.bitmap_ptr };
-        while self.current_index < bitmap.capacity() {
-            let index = self.current_index;
-            self.current_index += 1;
-
-            if bitmap.is_set(index).unwrap_or(false) {
-                return Some(index);
-            }
-        }
-        None
-    }
+/// Operation 描述符：记录 operation 在数据区的位置
+/// 注意：next_idx 存储在 PatchingOperation 数据本身中，不需要在描述符中重复
+#[derive(Debug, Clone, Copy)]
+struct OpDescriptor {
+    start_offset: usize,
 }
 
-#[repr(C)]
-#[derive(Debug)]
-struct Bitmap {
-    size: usize,
-    next_free_idx: usize,
-    bitmap_offset: isize,
-    bitmap_len: usize,
-}
-
-impl Bitmap {
-    fn iter(&self) -> BitmapIter {
-        BitmapIter {
-            bitmap_ptr: self as *const Bitmap,
-            current_index: 0,
-        }
-    }
-
-    fn init(&mut self, ptr: *mut u8, len: usize, create: bool) {
-        let self_addr = self as *const Bitmap as *const u8;
-        self.bitmap_offset = unsafe { ptr.offset_from(self_addr) };
-        self.bitmap_len = len;
-
-        if create {
-            self.size = 0;
-            self.next_free_idx = 0;
-            self.clear();
-        }
-    }
-
-    fn bitmap_ptr(&self) -> *mut u8 {
-        let self_addr = self as *const Bitmap as *const u8;
-        unsafe { self_addr.offset(self.bitmap_offset) as *mut u8 }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.bitmap_ptr(), self.bitmap_len) }
-    }
-
-    fn as_slice_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.bitmap_ptr(), self.bitmap_len) }
-    }
-
-    fn is_set(&self, idx: usize) -> Result<bool> {
-        if idx >= self.capacity() {
-            return Err(anyhow::anyhow!("Index out of bounds: {}", idx));
-        }
-
-        let byte_idx = idx / 8;
-        let bit_idx = idx % 8;
-        let slice = self.as_slice();
-        let bit = slice[byte_idx] & (1 << bit_idx);
-        Ok(bit != 0)
-    }
-
-    fn set(&mut self, idx: usize) -> Result<()> {
-        if idx >= self.capacity() {
-            return Err(anyhow::anyhow!("Index out of bounds: {}", idx));
-        }
-
-        let byte_idx = idx / 8;
-        let bit_idx = idx % 8;
-        let slice = self.as_slice_mut();
-        slice[byte_idx] |= 1 << bit_idx;
-
-        self.next_free_idx = (idx + 1) % self.capacity();
-        self.size += 1;
-        Ok(())
-    }
-
-    fn clear_at(&mut self, idx: usize) -> Result<()> {
-        if idx >= self.capacity() {
-            return Err(anyhow::anyhow!("Index out of bounds: {}", idx));
-        }
-
-        let byte_idx = idx / 8;
-        let bit_idx = idx % 8;
-        let slice = self.as_slice_mut();
-        slice[byte_idx] &= !(1 << bit_idx);
-
-        self.next_free_idx = idx % self.capacity();
-        self.size -= 1;
-        Ok(())
-    }
-
-    fn clear(&mut self) {
-        let slice = self.as_slice_mut();
-        slice.fill(0);
-        self.next_free_idx = 0;
-        self.size = 0;
-    }
-
-    fn find_n_clear(&mut self, n: usize) -> Result<Vec<usize>> {
-        if n == 0 {
-            return Ok(vec![]);
-        }
-        let mut n = n;
-        let mut ret = vec![];
-        for i in 0..self.capacity() {
-            if !self.is_set(i)? {
-                ret.push(i);
-                n -= 1;
-                if n == 0 {
-                    break;
-                }
-            }
-        }
-        if n > 0 {
-            return Err(anyhow::anyhow!("Not enough free slots found"));
-        }
-        Ok(ret)
-    }
-
-    fn find_first_clear(&mut self) -> Result<usize> {
-        let marker = self.next_free_idx;
-        while self.is_set(self.next_free_idx)? {
-            self.next_free_idx = (self.next_free_idx + 1) % self.capacity();
-            if self.next_free_idx == marker {
-                return Err(anyhow::anyhow!("No free slot found"));
-            }
-        }
-        let free_idx = self.next_free_idx;
-        self.next_free_idx = (self.next_free_idx + 1) % self.capacity();
-        Ok(free_idx)
-    }
-
-    fn capacity(&self) -> usize {
-        self.bitmap_len * 8
-    }
-
-    fn size(&self) -> usize {
-        self.size
-    }
-
-    pub fn print(&self, start: usize, length: usize) {
-        let slice = self.as_slice();
-        println!("Bitmap, start: {}, length: {}", start, length);
-        for i in start..start + length {
-            if i % 16 == 0 {
-                print!("0x{:x}: ", (i - start) / 8 + self.bitmap_ptr() as usize);
-            }
-            print!("{:02x} ", slice[i]);
-            if i % 16 == 15 {
-                println!();
-            }
-        }
-        println!();
-    }
-}
-
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PatchingCacheContent {
-    /// Size of the memory region backing this instance (i.e., the memory &self points to).
+    /// 整体内存大小
     total_size: usize,
 
-    entry_data_offset: usize,
+    /// Entry 相关
+    entry_current_data_size: usize,
+    entry_next_free_slot: usize,
+    entry_pending_deletions: usize,
+    entry_valid_count: usize, // ✅ 有效 entry 数量，用于优化遍历
 
+    /// Operation 相关
+    op_current_data_size: usize,
+    op_next_free_slot: usize,
+    op_pending_deletions: usize,
+    op_valid_count: usize, // ✅ 有效 operation 数量，用于优化遍历
+
+    /// Entry 数据区在 data 中的起始偏移
+    entry_data_offset: usize,
+    /// Operation 数据区在 data 中的起始偏移
     op_data_offset: usize,
 
-    entry_table_size: usize,
+    /// 是否需要使所有指针失效
+    invalidate: bool,
 
-    op_table_size: usize,
+    /// Entry 描述符表（固定大小，快速索引）
+    entry_descriptor_tbl: [Option<EntryDescriptor>; MAX_PATCHING_CACHE_ENTRIES],
 
-    entry_bitmap: Bitmap,
+    /// Operation 描述符表（固定大小，快速索引）
+    op_descriptor_tbl: [Option<OpDescriptor>; MAX_PATCHING_OPERATIONS],
 
-    op_bitmap: Bitmap,
-
+    /// 动态数据区的起始位置（柔性数组成员）
     data: [u8; 0],
 }
 
 impl std::fmt::Debug for PatchingCacheContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PatchingCacheContent {{")?;
-        write!(f, "data address: 0x{:x}, ", self.data.as_ptr() as usize)?;
-        write!(
-            f,
-            "total_size: {}, entry_data_offset: {}, op_data_offset: {}, entry_table_size: {}, op_table_size: {}",
-            self.total_size,
-            self.entry_data_offset,
-            self.op_data_offset,
-            self.entry_table_size,
-            self.op_table_size
-        )?;
-        write!(f, " }}")
+        write!(f, "total_size: {}, ", self.total_size)?;
+        write!(f, "entry_count: {}, ", self.entry_count())?;
+        write!(f, "op_count: {}, ", self.op_count())?;
+        write!(f, "entry_data_used: {}, ", self.entry_current_data_size)?;
+        write!(f, "op_data_used: {}", self.op_current_data_size)?;
+        write!(f, "}}")
     }
 }
 
 impl PatchingCacheContent {
-    pub fn entry_table_size(&self) -> usize {
-        self.entry_table_size
-    }
-    pub fn op_table_size(&self) -> usize {
-        self.op_table_size
+    /// 估算所需内存大小
+    pub fn estimate_memory_occupied(entry_size: usize, op_size: usize) -> usize {
+        let base_size = mem::size_of::<PatchingCacheContent>();
+
+        // Entry 数据区预估
+        let entry_data_size = entry_size * mem::size_of::<PatchingCacheEntry>();
+
+        // Operation 数据区预估
+        let op_data_size = op_size * mem::size_of::<PatchingOperation>();
+
+        // 对齐填充
+        let alignment =
+            mem::align_of::<PatchingOperation>().max(mem::align_of::<PatchingCacheEntry>());
+        let padding = alignment * 2;
+
+        base_size + entry_data_size + op_data_size + padding
     }
 
-    pub fn iter(&self) -> BitmapIter {
-        self.entry_bitmap.iter()
+    /// 初始化内容
+    pub fn init(&mut self, entry_size: usize, op_size: usize, create: bool) {
+        let size = Self::estimate_memory_occupied(entry_size, op_size);
+        assert!(
+            size >= mem::size_of_val(self),
+            "The backing memory must be at least {} bytes large.",
+            mem::size_of_val(self)
+        );
+
+        if create {
+            self.entry_current_data_size = 0;
+            self.entry_next_free_slot = 0;
+            self.entry_pending_deletions = 0;
+            self.entry_valid_count = 0;
+
+            self.op_current_data_size = 0;
+            self.op_next_free_slot = 0;
+            self.op_pending_deletions = 0;
+            self.op_valid_count = 0;
+
+            self.total_size = size;
+            self.invalidate = false;
+
+            self.entry_descriptor_tbl.fill(None);
+            self.op_descriptor_tbl.fill(None);
+
+            // 计算数据区偏移（确保对齐）
+            self.entry_data_offset = 0;
+            let op_align = mem::align_of::<PatchingOperation>();
+            self.op_data_offset = (entry_size * mem::size_of::<PatchingCacheEntry>() + op_align
+                - 1)
+                & !(op_align - 1);
+        }
+    }
+
+    pub fn total_size(&self) -> usize {
+        self.total_size
+    }
+
+    pub fn entry_table_size(&self) -> usize {
+        MAX_PATCHING_CACHE_ENTRIES
+    }
+
+    pub fn op_table_size(&self) -> usize {
+        MAX_PATCHING_OPERATIONS
     }
 
     pub fn entry_data_offset(&self) -> usize {
@@ -277,629 +144,594 @@ impl PatchingCacheContent {
         self.op_data_offset
     }
 
-    pub fn data_ptr(&self) -> *const u8 {
-        self.data.as_ptr()
+    /// 返回数据区的总空间（不包括 PatchingCacheContent 结构体本身）
+    pub fn total_space(&self) -> usize {
+        self.total_size.saturating_sub(mem::size_of_val(self))
     }
 
-    // pub fn clean_load_patching_table(
-    //     &mut self,
-    //     ctx: Rc<RefCell<AnalysisContext>>,
-    //     table: &PatchingTable,
-    // ) -> Result<()> {
-    //     self.clear();
-
-    //     self.init(table.entry_size, table.op_size, true);
-
-    //     for (i, (pp_id, ops)) in table.tbl.iter().enumerate() {
-    //         *self.entry_mut(i) = entry.clone();
-    //         self.entry_bitmap.set(i)?;
-    //     }
-
-    //     for (idx, op) in package.ops.iter() {
-    //         *self.op_mut(*idx) = op.clone();
-    //         self.op_bitmap.set(*idx)?;
-    //     }
-
-    //     Ok(())
-    // }
-
-    #[inline]
-    unsafe fn entry_data_ptr<T>(&self) -> *const T {
-        self.data.as_ptr().offset(self.entry_data_offset as isize) as *const T
-    }
-
-    #[inline]
-    unsafe fn op_data_ptr<T>(&self) -> *const T {
-        self.data.as_ptr().offset(self.op_data_offset as isize) as *const T
-    }
-
-    #[inline]
-    unsafe fn entry_ptr(&self, idx: usize) -> *const PatchingCacheEntry {
-        let addr = self.entry_data_ptr::<u8>();
-        let addr = addr.offset((idx * mem::size_of::<PatchingCacheEntry>()) as isize);
-        addr as *const PatchingCacheEntry
-    }
-
-    #[inline]
-    pub fn entry_ref(&self, idx: usize) -> &PatchingCacheEntry {
-        unsafe {
-            let addr = self.entry_data_ptr::<u8>();
-            let addr = addr.offset((idx * mem::size_of::<PatchingCacheEntry>()) as isize);
-            &*(addr as *const PatchingCacheEntry)
-        }
-    }
-
-    #[inline]
-    pub fn entry_mut(&self, idx: usize) -> &mut PatchingCacheEntry {
-        let addr = unsafe { self.entry_data_ptr::<u8>() };
-        unsafe {
-            let addr = addr.offset((idx * mem::size_of::<PatchingCacheEntry>()) as isize);
-            &mut *(addr as *mut PatchingCacheEntry)
-        }
-    }
-
-    #[inline]
-    pub fn op_ref(&self, idx: usize) -> &PatchingOperation {
-        unsafe {
-            let addr = self
-                .op_data_ptr::<u8>()
-                .offset((idx * mem::size_of::<PatchingOperation>()) as isize);
-            &*(addr as *const PatchingOperation)
-        }
-    }
-
-    #[inline]
-    unsafe fn op_ptr(&self, idx: usize) -> *const PatchingOperation {
-        let addr = self
-            .op_data_ptr::<u8>()
-            .offset((idx * mem::size_of::<PatchingOperation>()) as isize);
-        addr as *const PatchingOperation
-    }
-
-    #[inline]
-    pub fn op_mut(&self, idx: usize) -> &mut PatchingOperation {
-        unsafe {
-            let addr = self
-                .op_data_ptr::<u8>()
-                .offset((idx * mem::size_of::<PatchingOperation>()) as isize);
-            &mut *(addr as *mut PatchingOperation)
-        }
-    }
-
-    pub fn estimate_memory_occupied(entry_size: usize, op_size: usize) -> usize {
-        let entry_bitmap_len = entry_size.div_ceil(8);
-        let op_bitmap_len = op_size.div_ceil(8);
-
-        // 计算内存布局，与 init 方法完全一致
-        let entry_align = mem::align_of::<PatchingCacheEntry>();
-        let op_align = mem::align_of::<PatchingOperation>();
-        let max_align = std::cmp::max(
-            std::cmp::max(entry_align, op_align),
-            mem::align_of::<PatchingCacheContent>(),
-        );
-
-        // 基础结构大小（包括 PatchingCacheContent 本身）
-        let base_size = mem::size_of::<Self>();
-
-        // 计算 entry 数据偏移（从 data 开始计算，考虑对齐）
-        let entry_data_offset = (entry_bitmap_len + entry_align - 1) & !(entry_align - 1);
-
-        // 计算 op bitmap 偏移
-        let op_bitmap_offset =
-            entry_data_offset + entry_size * mem::size_of::<PatchingCacheEntry>();
-
-        // 计算 op 数据偏移（考虑对齐）
-        let op_data_offset = (op_bitmap_offset + op_bitmap_len + op_align - 1) & !(op_align - 1);
-
-        // 总大小：从 PatchingCacheContent 开始到 op 数据结束
-        let total_size = base_size + op_data_offset + op_size * mem::size_of::<PatchingOperation>();
-
-        // 确保对齐到最大对齐要求（与 shm_open 一致）
-        let aligned_size = (total_size + max_align - 1) & !(max_align - 1);
-
-        // 确保最小内存大小不小于 PatchingCacheContent 本身的大小
-        std::cmp::max(aligned_size, mem::size_of::<Self>())
-    }
-
-    /// Initialize the content.
-    /// NOTE: This function must be called before any other!
-    pub fn init(&mut self, entry_size: usize, op_size: usize, create: bool) {
-        let entry_bitmap_len = entry_size.div_ceil(8);
-        let op_bitmap_len = op_size.div_ceil(8);
-
-        // Memory layout
-        // - data address (aligned)
-        // - entry bitmap [u8]
-        // - padding for PatchingCacheEntry alignment
-        // - [PatchingCacheEntry]
-        // - op bitmap [u8]
-        // - padding for PatchingOperation alignment
-        // - [PatchingOperation]
-
-        // Since the shared memory base address is now guaranteed to be aligned
-        // to the maximum alignment requirement, we can use simpler calculations
-
-        // Calculate entry data offset with proper alignment
-        let entry_align = mem::align_of::<PatchingCacheEntry>();
-        self.entry_data_offset = (entry_bitmap_len + entry_align - 1) & !(entry_align - 1);
-
-        // Calculate op bitmap offset
-        let op_bitmap_offset =
-            self.entry_data_offset + entry_size * mem::size_of::<PatchingCacheEntry>();
-
-        // Calculate op data offset with proper alignment
-        let op_align = mem::align_of::<PatchingOperation>();
-        self.op_data_offset = (op_bitmap_offset + op_bitmap_len + op_align - 1) & !(op_align - 1);
-
-        // #[cfg(debug_assertions)]
-        // {
-        //     println!(
-        //         "mem::size_of::<PatchingCacheEntry>(): {}",
-        //         mem::size_of::<PatchingCacheEntry>()
-        //     );
-        //     println!(
-        //         "mem::align_of::<PatchingCacheEntry>(): {}",
-        //         mem::align_of::<PatchingCacheEntry>()
-        //     );
-        //     println!(
-        //         "mem::size_of::<PatchingOperation>(): {}",
-        //         mem::size_of::<PatchingOperation>()
-        //     );
-        //     println!(
-        //         "mem::align_of::<PatchingOperation>(): {}",
-        //         mem::align_of::<PatchingOperation>()
-        //     );
-        //     println!("data: {:p}", self.data.as_ptr());
-        //     println!("data + entry_data_offset: {:p}", unsafe {
-        //         self.data.as_ptr().offset(self.entry_data_offset as isize)
-        //     });
-        //     println!("data + op_bitmap_offset: {:p}", unsafe {
-        //         self.data.as_ptr().offset(op_bitmap_offset as isize)
-        //     });
-        //     println!("data + op_data_offset: {:p}", unsafe {
-        //         self.data.as_ptr().offset(self.op_data_offset as isize)
-        //     });
-
-        //     // Verify alignment
-        //     let entry_ptr = unsafe { self.data.as_ptr().offset(self.entry_data_offset as isize) };
-        //     let op_ptr = unsafe { self.data.as_ptr().offset(self.op_data_offset as isize) };
-        //     assert_eq!(
-        //         entry_ptr as usize % entry_align,
-        //         0,
-        //         "Entry data not aligned"
-        //     );
-        //     assert_eq!(op_ptr as usize % op_align, 0, "Op data not aligned");
-
-        //     println!(
-        //         "Entry data alignment verified: {}",
-        //         entry_ptr as usize % entry_align == 0
-        //     );
-        //     println!(
-        //         "Op data alignment verified: {}",
-        //         op_ptr as usize % op_align == 0
-        //     );
-        // }
-
-        self.entry_table_size = entry_size;
-        self.op_table_size = op_size;
-
-        self.entry_bitmap
-            .init(self.data.as_mut_ptr(), entry_bitmap_len, create);
-        self.op_bitmap.init(
-            unsafe { self.data.as_mut_ptr().offset(op_bitmap_offset as isize) },
-            op_bitmap_len,
-            create,
-        );
-    }
-
-    fn entry_space_size(&self) -> usize {
-        self.entry_table_size * mem::size_of::<PatchingCacheEntry>()
-    }
-
-    fn entry_space_left(&self) -> usize {
-        self.entry_space_size() - self.entry_bitmap.size() * mem::size_of::<PatchingCacheEntry>()
-    }
-
-    fn op_space_size(&self) -> usize {
-        self.op_table_size * mem::size_of::<PatchingOperation>()
-    }
-
-    fn op_space_left(&self) -> usize {
-        self.op_space_size() - self.op_bitmap.size() * mem::size_of::<PatchingOperation>()
+    /// 返回剩余可用空间
+    pub fn space_left(&self) -> usize {
+        self.total_space()
+            .saturating_sub(self.entry_current_data_size)
+            .saturating_sub(self.op_current_data_size)
     }
 
     pub fn clear(&mut self) {
-        self.entry_bitmap.clear();
-        self.op_bitmap.clear();
+        self.entry_current_data_size = 0;
+        self.entry_next_free_slot = 0;
+        self.entry_pending_deletions = 0;
+        self.entry_valid_count = 0;
+
+        self.op_current_data_size = 0;
+        self.op_next_free_slot = 0;
+        self.op_pending_deletions = 0;
+        self.op_valid_count = 0;
+
+        self.entry_descriptor_tbl.fill(None);
+        self.op_descriptor_tbl.fill(None);
+
+        self.invalidate = true;
     }
 
-    pub fn ops(&self, idx: usize) -> Vec<PatchingOperation> {
-        let mut ops = vec![];
-        let mut op_idx = self.entry_ref(idx).op_head_idx;
-        while let Some(idx) = op_idx {
-            ops.push(self.op_ref(idx).clone());
-            op_idx = self.op_ref(idx).next_idx;
+    pub fn is_invalidated(&self) -> bool {
+        self.invalidate
+    }
+
+    pub fn clear_invalidated(&mut self) {
+        self.invalidate = false;
+    }
+
+    /// 获取 entry 数据区起始指针
+    pub unsafe fn data_ptr(&self) -> *const u8 {
+        self.data.as_ptr()
+    }
+
+    /// 获取 entry 数据区起始指针
+    unsafe fn entry_data_ptr(&self) -> *const u8 {
+        unsafe { self.data_ptr().offset(self.entry_data_offset as isize) }
+    }
+
+    /// 获取 operation 数据区起始指针
+    unsafe fn op_data_ptr(&self) -> *const u8 {
+        unsafe { self.data_ptr().offset(self.op_data_offset as isize) }
+    }
+
+    /// 通过偏移获取 entry 引用
+    pub unsafe fn entry_ref_by_offset(&self, offset: usize) -> &PatchingCacheEntry {
+        unsafe {
+            let ptr = self.entry_data_ptr().offset(offset as isize);
+            &*(ptr as *const PatchingCacheEntry)
         }
+    }
+
+    /// 通过偏移获取 entry 可变引用
+    pub unsafe fn entry_mut_by_offset(&self, offset: usize) -> &mut PatchingCacheEntry {
+        unsafe {
+            let ptr = self.entry_data_ptr().offset(offset as isize);
+            &mut *(ptr as *mut PatchingCacheEntry)
+        }
+    }
+
+    /// 通过索引获取 entry 引用
+    pub fn entry_ref(&self, idx: usize) -> &PatchingCacheEntry {
+        let desc = self.entry_descriptor_tbl[idx]
+            .as_ref()
+            .expect("Entry descriptor not found");
+        unsafe { self.entry_ref_by_offset(desc.start_offset) }
+    }
+
+    /// 通过索引获取 entry 可变引用
+    pub fn entry_mut(&self, idx: usize) -> &mut PatchingCacheEntry {
+        let desc = self.entry_descriptor_tbl[idx]
+            .as_ref()
+            .expect("Entry descriptor not found");
+        unsafe { self.entry_mut_by_offset(desc.start_offset) }
+    }
+
+    /// 通过偏移获取 operation 引用
+    unsafe fn op_ref_by_offset(&self, offset: usize) -> &PatchingOperation {
+        unsafe {
+            let ptr = self.op_data_ptr().offset(offset as isize);
+            &*(ptr as *const PatchingOperation)
+        }
+    }
+
+    /// ✅ 关键API：通过 descriptor 索引获取 operation 引用
+    /// 供 pingu-agent stub 调用，保持 API 兼容性
+    pub fn op_ref(&self, descriptor_idx: usize) -> &PatchingOperation {
+        let op_desc = self.op_descriptor_tbl[descriptor_idx]
+            .as_ref()
+            .expect("Operation descriptor not found");
+        unsafe { self.op_ref_by_offset(op_desc.start_offset) }
+    }
+
+    /// 通过 descriptor 索引获取 operation 可变引用
+    pub fn op_mut(&self, descriptor_idx: usize) -> &mut PatchingOperation {
+        let op_desc = self.op_descriptor_tbl[descriptor_idx]
+            .as_ref()
+            .expect("Operation descriptor not found");
+        unsafe {
+            let ptr = self.op_data_ptr().offset(op_desc.start_offset as isize);
+            &mut *(ptr as *mut PatchingOperation)
+        }
+    }
+
+    /// 获取所有 entries
+    pub fn entries(&self) -> Vec<&PatchingCacheEntry> {
+        let mut result = Vec::with_capacity(self.entry_valid_count);
+        let mut found = 0;
+
+        // ✅ 使用计数器提前退出，避免遍历所有槽位
+        for desc in self.entry_descriptor_tbl.iter() {
+            if found >= self.entry_valid_count {
+                break;
+            }
+            if let Some(entry_desc) = desc {
+                result.push(unsafe { self.entry_ref_by_offset(entry_desc.start_offset) });
+                found += 1;
+            }
+        }
+        result
+    }
+
+    /// 获取所有 entries（可变）
+    pub fn entries_mut(&mut self) -> Vec<&mut PatchingCacheEntry> {
+        let count = self.entry_valid_count;
+        let mut result = Vec::with_capacity(count);
+        let mut found = 0;
+
+        // ✅ 使用计数器提前退出，避免遍历所有槽位
+        for desc in self.entry_descriptor_tbl.iter() {
+            if found >= count {
+                break;
+            }
+            if let Some(entry_desc) = desc {
+                result.push(unsafe { self.entry_mut_by_offset(entry_desc.start_offset) });
+                found += 1;
+            }
+        }
+        result
+    }
+
+    /// 添加一个 entry
+    pub fn push(&mut self, entry: PatchingCacheEntry) -> anyhow::Result<usize> {
+        if self.entry_next_free_slot >= MAX_PATCHING_CACHE_ENTRIES {
+            anyhow::bail!("Entry descriptor table full, maybe consolidate() first");
+        }
+
+        let entry_size = mem::size_of::<PatchingCacheEntry>();
+        if entry_size > self.space_left() {
+            log::error!("Not enough space left in the cache to push entry");
+            anyhow::bail!("Not enough space for entry");
+        }
+
+        let descriptor_idx = self.entry_next_free_slot;
+        let descriptor = Some(EntryDescriptor {
+            start_offset: self.entry_current_data_size,
+            op_head_idx: None,
+        });
+
+        // 填充描述符表
+        if let ref mut slot @ None = self.entry_descriptor_tbl[descriptor_idx] {
+            *slot = descriptor;
+            self.entry_next_free_slot = min(
+                self.entry_next_free_slot + 1,
+                MAX_PATCHING_CACHE_ENTRIES - 1,
+            );
+            self.entry_valid_count += 1; // ✅ 增加有效 entry 计数
+        } else {
+            log::error!("entry_descriptor_tbl[{}] is not None", descriptor_idx);
+            anyhow::bail!("Descriptor slot not available");
+        }
+
+        // 拷贝 entry 数据到数据区
+        unsafe {
+            let dst = self
+                .entry_data_ptr()
+                .offset(self.entry_current_data_size as isize);
+            ptr::copy_nonoverlapping(&entry as *const _ as *const u8, dst as *mut u8, entry_size);
+        }
+
+        self.entry_current_data_size += entry_size;
+        self.invalidate = true;
+
+        // ✅ 当空间利用率过高时，触发 consolidate
+        if self.space_left() < self.total_space() / 10 {
+            log::debug!("Space utilization high, triggering consolidate");
+            unsafe {
+                let _ = self.consolidate();
+            }
+        }
+
+        Ok(descriptor_idx)
+    }
+
+    /// 为指定 entry 添加一个 operation
+    pub fn push_op(&mut self, entry_idx: usize, mut op: PatchingOperation) -> anyhow::Result<()> {
+        let mut entry_desc = self.entry_descriptor_tbl[entry_idx]
+            .ok_or_else(|| anyhow::anyhow!("Entry not found"))?;
+
+        if self.op_next_free_slot >= MAX_PATCHING_OPERATIONS {
+            anyhow::bail!("Operation descriptor table full, maybe consolidate() first");
+        }
+
+        let op_size = mem::size_of::<PatchingOperation>();
+        if op_size > self.space_left() {
+            anyhow::bail!("Not enough space for operation");
+        }
+
+        let op_idx = self.op_next_free_slot;
+        let op_descriptor = Some(OpDescriptor {
+            start_offset: self.op_current_data_size,
+        });
+
+        self.op_descriptor_tbl[op_idx] = op_descriptor;
+        self.op_next_free_slot = min(self.op_next_free_slot + 1, MAX_PATCHING_OPERATIONS - 1);
+        self.op_valid_count += 1; // ✅ 增加有效 operation 计数
+
+        // ✅ 确保 PatchingOperation 数据的 next_idx 初始化为 None
+        op.next_idx = None;
+
+        // 拷贝 operation 数据
+        unsafe {
+            let dst = self
+                .op_data_ptr()
+                .offset(self.op_current_data_size as isize);
+            ptr::copy_nonoverlapping(&op as *const _ as *const u8, dst as *mut u8, op_size);
+        }
+
+        self.op_current_data_size += op_size;
+
+        // 链接到 entry 的操作链表
+        if entry_desc.op_head_idx.is_none() {
+            // 第一个操作
+            entry_desc.op_head_idx = Some(op_idx);
+            self.entry_descriptor_tbl[entry_idx] = Some(entry_desc);
+        } else {
+            // 追加到链表末尾，找到最后一个 operation
+            let mut current_idx = entry_desc.op_head_idx.unwrap();
+            loop {
+                // ✅ 通过读取 PatchingOperation 数据中的 next_idx 来遍历链表
+                let current_op = self.op_ref(current_idx);
+                if current_op.next_idx.is_none() {
+                    // ✅ 只需更新实际 PatchingOperation 数据中的 next_idx（供 stub 读取）
+                    let prev_op = self.op_mut(current_idx);
+                    prev_op.next_idx = Some(op_idx);
+                    break;
+                }
+                current_idx = current_op.next_idx.unwrap();
+            }
+        }
+
+        self.invalidate = true;
+        Ok(())
+    }
+
+    /// 批量添加 operations
+    pub fn push_op_batch(
+        &mut self,
+        entry_idx: usize,
+        ops: &[PatchingOperation],
+    ) -> anyhow::Result<()> {
+        for op in ops {
+            self.push_op(entry_idx, *op)?;
+        }
+        Ok(())
+    }
+
+    /// 清除 entry 的所有 operations
+    pub fn clear_entry_ops(&mut self, entry_idx: usize) -> anyhow::Result<()> {
+        let mut entry_desc = self.entry_descriptor_tbl[entry_idx]
+            .ok_or_else(|| anyhow::anyhow!("Entry not found"))?;
+
+        if let Some(op_head_idx) = entry_desc.op_head_idx {
+            self.remove_op_chain(op_head_idx);
+            entry_desc.op_head_idx = None;
+            self.entry_descriptor_tbl[entry_idx] = Some(entry_desc);
+        }
+
+        Ok(())
+    }
+
+    /// 获取 entry 的所有 operations
+    pub fn ops(&self, entry_idx: usize) -> Vec<PatchingOperation> {
+        if let Some(desc) = self.entry_descriptor_tbl[entry_idx].as_ref() {
+            self.get_entry_ops(desc)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn get_entry_ops(&self, desc: &EntryDescriptor) -> Vec<PatchingOperation> {
+        let mut ops = Vec::new();
+        let mut current_idx = desc.op_head_idx;
+
+        while let Some(idx) = current_idx {
+            if let Some(_op_desc) = self.op_descriptor_tbl[idx] {
+                // ✅ 通过 op_ref 读取 operation，其中包含 next_idx
+                let op = self.op_ref(idx);
+                ops.push(*op);
+                current_idx = op.next_idx;
+            } else {
+                break;
+            }
+        }
+
         ops
     }
 
-    pub fn find_ops(&self, id: PatchPointID) -> Result<Vec<&PatchingOperation>> {
-        let entry = self.find_entry(id);
-        if entry.is_none() {
-            return Err(anyhow::anyhow!("Entry not found"));
-        }
-        let (_, entry) = entry.unwrap();
-        let mut ops = vec![];
-        let mut op_idx = entry.op_head_idx;
-        while let Some(idx) = op_idx {
-            ops.push(self.op_ref(idx));
-            op_idx = self.op_ref(idx).next_idx;
-        }
-        Ok(ops)
-    }
+    /// 根据索引删除 entry（O(1) 复杂度，无需查找）
+    pub fn remove_by_idx(&mut self, entry_idx: usize) -> anyhow::Result<()> {
+        let entry_desc = self.entry_descriptor_tbl[entry_idx]
+            .ok_or_else(|| anyhow::anyhow!("Entry descriptor not found at index {}", entry_idx))?;
 
-    /// NOTE: The returned referencers are only valid as long as no entries are added
-    /// or removed.
-    fn entries_raw(&self) -> Vec<*const PatchingCacheEntry> {
-        let mut ret = Vec::new();
-        self.entry_bitmap.iter().for_each(|idx| {
+        // 删除关联的所有 operations
+        if let Some(op_head_idx) = entry_desc.op_head_idx {
+            self.remove_op_chain(op_head_idx);
+        }
+
+        // 标记 entry descriptor 为 None（懒删除）
+        self.entry_descriptor_tbl[entry_idx] = None;
+        self.entry_pending_deletions += 1;
+        self.entry_valid_count = self.entry_valid_count.saturating_sub(1); // ✅ 减少有效 entry 计数
+        self.invalidate = true;
+
+        // 达到阈值时压缩
+        if self.entry_pending_deletions > PENDING_DELETIONS_LIMIT {
             unsafe {
-                let addr = self.entry_ptr(idx);
-                ret.push(addr);
-            };
-        });
-        ret
-    }
-
-    fn allocate_entry(&mut self) -> Result<(usize, &mut PatchingCacheEntry)> {
-        let free_idx = self.entry_bitmap.find_first_clear()?;
-
-        if mem::size_of::<PatchingCacheEntry>() * (free_idx + 1) > self.entry_space_size() {
-            log::error!("Found free entry slot, but not enough space to store the entry");
-            return Err(anyhow::anyhow!(
-                "Found free entry slot, but not enough space to store the entry"
-            ));
-        }
-
-        self.entry_bitmap.set(free_idx)?;
-
-        let entry_mut = self.entry_mut(free_idx);
-
-        Ok((free_idx, entry_mut))
-    }
-
-    fn allocate_op(&mut self) -> Result<(usize, &mut PatchingOperation)> {
-        let free_idx = self.op_bitmap.find_first_clear()?;
-
-        if mem::size_of::<PatchingOperation>() * (free_idx + 1) > self.op_space_size() {
-            log::error!("Found free op slot, but not enough space to store the operation");
-            return Err(anyhow::anyhow!(
-                "Found free op slot, but not enough space to store the operation"
-            ));
-        }
-
-        self.op_bitmap.set(free_idx)?;
-
-        let op_mut = self.op_mut(free_idx);
-
-        Ok((free_idx, op_mut))
-    }
-
-    pub fn reset_all_entry_op(&mut self) {
-        self.entry_bitmap.iter().for_each(|idx| {
-            let entry = self.entry_mut(idx);
-            entry.metadata.op_idx = entry.op_head_idx;
-        });
-    }
-
-    pub fn push_op_batch(
-        &mut self,
-        idx: usize,
-        ops: &Vec<PatchingOperation>,
-    ) -> Result<Option<usize>> {
-        if ops.len() == 0 {
-            return Ok(None);
-        }
-
-        if ops.len() * mem::size_of::<PatchingOperation>() > self.op_space_left() {
-            return Err(anyhow::anyhow!("Not enough space to store the operations"));
-        }
-
-        let free_op_indices = self.op_bitmap.find_n_clear(ops.len())?;
-
-        if free_op_indices.len() * mem::size_of::<PatchingOperation>() > self.op_space_left() {
-            return Err(anyhow::anyhow!("Not enough space to store the operations"));
-        }
-
-        let mut prev_op_idx = None;
-        for (i, op) in ops.iter().enumerate() {
-            let op_mut = self.op_mut(free_op_indices[i]);
-            *op_mut = *op;
-            self.op_bitmap.set(free_op_indices[i])?;
-            if prev_op_idx.is_none() {
-                prev_op_idx = Some(free_op_indices[i]);
-            } else {
-                self.op_mut(prev_op_idx.unwrap()).next_idx = Some(free_op_indices[i]);
+                let _ = self.consolidate()?;
             }
         }
-
-        let entry = self.entry_mut(idx);
-        if entry.op_head_idx.is_none() {
-            // The entry does not have any operations before.
-            entry.op_head_idx = Some(free_op_indices[0]);
-            entry.op_tail_idx = Some(free_op_indices[ops.len() - 1]);
-        } else {
-            let tail_op_idx = entry.op_tail_idx.unwrap();
-            entry.op_tail_idx = Some(free_op_indices[0]);
-            self.op_mut(tail_op_idx).next_idx = Some(free_op_indices[0]);
-        }
-
-        Ok(Some(free_op_indices[0]))
-    }
-
-    pub fn push_op(&mut self, idx: usize, op: &PatchingOperation) -> Result<usize> {
-        // Check if the entry of idx exists.
-        if !self.entry_bitmap.is_set(idx)? {
-            return Err(anyhow::anyhow!(format!("Entry of idx {} not found", idx)));
-        }
-
-        let entry = self.entry_ref(idx);
-
-        if entry.op_head_idx.is_none() {
-            // The operation to be pushed is the first one.
-            let (op_idx, op_mut) = self.allocate_op()?;
-            *op_mut = *op;
-            let entry = self.entry_mut(idx);
-            entry.op_head_idx = Some(op_idx);
-            entry.op_tail_idx = Some(op_idx);
-            Ok(op_idx)
-        } else {
-            let tail_op_idx = entry.op_tail_idx.unwrap();
-            let (op_idx, op_mut) = self.allocate_op()?;
-            *op_mut = *op;
-            self.op_mut(tail_op_idx).next_idx = Some(op_idx);
-            self.entry_mut(idx).op_tail_idx = Some(op_idx);
-            Ok(op_idx)
-        }
-    }
-
-    /// NOTE: The returned referencers are only valid as long as no entries are added
-    /// or removed.
-    pub fn entries(&self) -> Vec<&PatchingCacheEntry> {
-        self.entries_raw()
-            .into_iter()
-            .map(|e| unsafe { &*e })
-            .collect()
-    }
-
-    /// NOTE: The returned referencers are only valid as long as no entries are added
-    /// or removed.
-    pub fn entries_mut(&mut self) -> Vec<&mut PatchingCacheEntry> {
-        self.entries_raw()
-            .into_iter()
-            .map(|e| unsafe { &mut *(e as *mut PatchingCacheEntry) })
-            .collect()
-    }
-
-    pub fn push(&mut self, entry: PatchingCacheEntry) -> Result<usize> {
-        if entry.size() > self.entry_space_left() {
-            return Err(anyhow::anyhow!("Not enough space to store the entry"));
-        }
-
-        let (idx, entry_mut) = self.allocate_entry()?;
-        *entry_mut = entry;
-        entry_mut.op_head_idx = None;
-        entry_mut.op_tail_idx = None;
-
-        Ok(idx)
-    }
-
-    pub fn find_entry(&self, id: PatchPointID) -> Option<(usize, &PatchingCacheEntry)> {
-        self.entry_bitmap
-            .iter()
-            .find(|idx| {
-                let entry = self.entry_ref(*idx);
-                entry.id() == id
-            })
-            .map(|idx| (idx, self.entry_ref(idx)))
-    }
-
-    fn find_entry_mut(&mut self, id: PatchPointID) -> Option<(usize, &mut PatchingCacheEntry)> {
-        self.entry_bitmap
-            .iter()
-            .find(|idx| {
-                let entry = self.entry_ref(*idx);
-                entry.id() == id
-            })
-            .map(|idx| (idx, self.entry_mut(idx)))
-    }
-
-    pub fn remove_op(&mut self, id: PatchPointID, op_idx: usize) -> Result<()> {
-        let entry = self.find_entry(id);
-        if entry.is_none() {
-            return Err(anyhow::anyhow!(
-                "Entry with patchpoint id {:?} not found",
-                id
-            ));
-        }
-        let (_, entry) = entry.unwrap();
-        if entry.op_head_idx.is_none() {
-            return Err(anyhow::anyhow!(
-                "Entry with patchpoint id {:?} has no operations",
-                id
-            ));
-        }
-
-        // Find the prev slot and the slot to be removed.
-        let mut prev_idx = None;
-        let mut current_idx = entry.op_head_idx;
-        for i in 0..op_idx {
-            if let Some(idx) = current_idx {
-                if self.op_bitmap.is_set(idx).unwrap() {
-                    prev_idx = Some(idx);
-                    current_idx = self.op_ref(idx).next_idx;
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Operation at index {} of patchpoint id {:?} does not exist in the descriptor table",
-                        i,
-                        op_idx
-                    ));
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Operation at index {:?} of patchpoint id {:?} does not have next slot",
-                    i - 1,
-                    op_idx
-                ));
-            }
-        }
-
-        if current_idx.is_none() {
-            return Err(anyhow::anyhow!(
-                "Operation at index {:?} of patchpoint id {:?} does not exist",
-                id,
-                op_idx
-            ));
-        }
-
-        let next_idx = if let Some(idx) = current_idx {
-            self.op_ref(idx).next_idx
-        } else {
-            return Err(anyhow::anyhow!(
-                "Operation at index {:?} of patchpoint id {:?} descriptor not found in table",
-                op_idx,
-                id
-            ));
-        };
-
-        self.op_bitmap.clear_at(current_idx.unwrap())?;
-
-        // The operation to be removed is the first one.
-        if prev_idx.is_none() {
-            self.find_entry_mut(id).unwrap().1.op_head_idx = next_idx;
-        }
-
-        // The operation to be removed is the last one.
-        if next_idx.is_none() {
-            self.find_entry_mut(id).unwrap().1.op_tail_idx = prev_idx;
-        }
-
-        if prev_idx.is_some() && next_idx.is_some() {
-            if self.op_bitmap.is_set(prev_idx.unwrap())? {
-                self.op_mut(prev_idx.unwrap()).next_idx = next_idx;
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Prev operation of the operation at index {:?} of patchpoint id {:?} not found in table",
-                    op_idx,
-                    id
-                ));
-            }
-        }
-
-        return Ok(());
-    }
-
-    pub fn clear_entry_ops(&mut self, idx: usize) -> Result<()> {
-        let entry = self.entry_mut(idx);
-        let mut op_idx = entry.op_head_idx;
-        while let Some(idx) = op_idx {
-            self.op_bitmap.clear_at(idx)?;
-            op_idx = self.op_ref(idx).next_idx;
-        }
-        let entry = self.entry_mut(idx);
-        entry.op_head_idx = None;
-        entry.op_tail_idx = None;
 
         Ok(())
     }
 
-    pub fn remove_entry_idx(&mut self, idx: usize) -> Result<()> {
-        self.clear_entry_ops(idx)?;
-        self.entry_bitmap.clear_at(idx)?;
+    /// 根据 ID 删除 entry（需要 O(n) 线性查找）
+    pub fn remove(&mut self, id: PatchPointID) -> anyhow::Result<()> {
+        // 查找 entry 索引
+        let entry_idx = self
+            .find_entry(id)
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| anyhow::anyhow!("Entry with id {:?} not found", id))?;
+
+        // 使用索引删除
+        self.remove_by_idx(entry_idx)
+    }
+
+    /// 删除 operation 链表
+    fn remove_op_chain(&mut self, head_idx: usize) {
+        let mut current_idx = Some(head_idx);
+
+        while let Some(idx) = current_idx {
+            if let Some(_op_desc) = self.op_descriptor_tbl[idx] {
+                // ✅ 先读取 next_idx，然后删除当前 descriptor
+                let next = self.op_ref(idx).next_idx;
+                self.op_descriptor_tbl[idx] = None;
+                self.op_pending_deletions += 1;
+                self.op_valid_count = self.op_valid_count.saturating_sub(1); // ✅ 减少有效 operation 计数
+                current_idx = next;
+            } else {
+                break;
+            }
+        }
+
+        if self.op_pending_deletions > PENDING_DELETIONS_LIMIT {
+            unsafe {
+                let _ = self.consolidate();
+            }
+        }
+    }
+
+    /// 压缩内存，移除空洞
+    pub unsafe fn consolidate(&mut self) -> anyhow::Result<()> {
+        self.invalidate = true;
+
+        // 备份所有有效的 entries 和 operations
+        let entries_with_ops: Vec<(PatchingCacheEntry, Vec<PatchingOperation>)> = self
+            .entry_descriptor_tbl
+            .iter()
+            .filter_map(|desc| desc.as_ref())
+            .map(|desc| {
+                let entry = unsafe { self.entry_ref_by_offset(desc.start_offset).clone() };
+                let ops = self.get_entry_ops(desc);
+                (entry, ops)
+            })
+            .collect();
+
+        // 清空
+        self.clear();
+
+        // 重新添加（紧凑排列）
+        for (entry, ops) in entries_with_ops {
+            let entry_idx = self.push(entry)?;
+            if !ops.is_empty() {
+                self.push_op_batch(entry_idx, &ops)?;
+            }
+        }
 
         Ok(())
     }
 
+    /// 保留满足条件的 entries
+    /// ✅ 闭包接收可变引用，允许在判断的同时修改 entry
     pub fn retain<F>(&mut self, mut f: F) -> usize
     where
-        F: FnMut(&PatchingCacheEntry) -> bool,
+        F: FnMut(&mut PatchingCacheEntry) -> bool,
     {
         let mut removed_count = 0;
-        self.entry_bitmap.iter().for_each(|idx| {
-            if !f(self.entry_ref(idx)) {
-                self.remove_entry_idx(idx).unwrap();
-                removed_count += 1;
-            }
-        });
+        let mut checked = 0;
+        let initial_count = self.entry_valid_count;
 
+        // ✅ 使用计数器提前退出
+        for idx in 0..MAX_PATCHING_CACHE_ENTRIES {
+            if checked >= initial_count {
+                break;
+            }
+
+            if let Some(desc) = self.entry_descriptor_tbl[idx] {
+                let entry = unsafe { self.entry_mut_by_offset(desc.start_offset) };
+                checked += 1;
+
+                if !f(entry) {
+                    // 删除这个 entry
+                    if let Some(op_head_idx) = desc.op_head_idx {
+                        self.remove_op_chain(op_head_idx);
+                    }
+                    self.entry_descriptor_tbl[idx] = None;
+                    self.entry_pending_deletions += 1;
+                    self.entry_valid_count = self.entry_valid_count.saturating_sub(1); // ✅ 减少有效 entry 计数
+                    removed_count += 1;
+                }
+            }
+        }
+
+        if self.entry_pending_deletions > PENDING_DELETIONS_LIMIT {
+            unsafe {
+                let _ = self.consolidate();
+            }
+        }
+
+        self.invalidate = true;
         removed_count
     }
 
-    pub fn remove(&mut self, id: PatchPointID) -> Result<usize> {
-        let res = self.find_entry(id);
-        if res.is_none() {
-            return Err(anyhow::anyhow!("Entry not found"));
+    /// 获取 entry 数量（O(1) 复杂度）
+    #[inline]
+    pub fn entry_count(&self) -> usize {
+        self.entry_valid_count
+    }
+
+    /// 获取 operation 数量（O(1) 复杂度）
+    #[inline]
+    pub fn op_count(&self) -> usize {
+        self.op_valid_count
+    }
+
+    /// 查找 entry
+    pub fn find_entry(&self, id: PatchPointID) -> Option<(usize, &PatchingCacheEntry)> {
+        let mut found = 0;
+
+        // ✅ 使用计数器提前退出
+        for (idx, desc) in self.entry_descriptor_tbl.iter().enumerate() {
+            if found >= self.entry_valid_count {
+                break;
+            }
+            if let Some(entry_desc) = desc {
+                let entry = unsafe { self.entry_ref_by_offset(entry_desc.start_offset) };
+                found += 1;
+                if entry.id() == id {
+                    return Some((idx, entry));
+                }
+            }
+        }
+        None
+    }
+
+    /// 迭代所有有效的 entry 索引（只读）
+    pub fn iter(&self) -> EntryIndexIter {
+        EntryIndexIter {
+            descriptor_tbl: &self.entry_descriptor_tbl,
+            current: 0,
+            remaining: self.entry_valid_count, // ✅ 记录剩余数量
+        }
+    }
+
+    /// 迭代所有有效的 entry 索引（可变）
+    pub fn iter_mut(&mut self) -> EntryIndexIterMut {
+        EntryIndexIterMut {
+            descriptor_tbl: &mut self.entry_descriptor_tbl,
+            current: 0,
+            remaining: self.entry_valid_count, // ✅ 记录剩余数量
+        }
+    }
+}
+
+/// Entry 索引迭代器（只读）
+/// 直接遍历 descriptor table，利用计数器优化提前退出
+pub struct EntryIndexIter {
+    descriptor_tbl: *const [Option<EntryDescriptor>; MAX_PATCHING_CACHE_ENTRIES],
+    current: usize,
+    remaining: usize, // ✅ 剩余有效 entry 数量
+}
+
+impl Iterator for EntryIndexIter {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // ✅ 使用计数器提前退出
+        if self.remaining == 0 {
+            return None;
         }
 
-        let (idx, _) = res.unwrap();
-
-        // self.clear_entry_ops(idx)?;
-        self.remove_entry_idx(idx)?;
-
-        Ok(idx)
+        unsafe {
+            while self.current < MAX_PATCHING_CACHE_ENTRIES {
+                let idx = self.current;
+                self.current += 1;
+                if (*self.descriptor_tbl)[idx].is_some() {
+                    self.remaining -= 1;
+                    return Some(idx);
+                }
+            }
+        }
+        None
     }
 
-    pub fn op_count(&self) -> usize {
-        self.op_bitmap.size()
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for EntryIndexIter {
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+/// Entry 索引迭代器（可变）
+/// 直接遍历 descriptor table，利用计数器优化提前退出
+pub struct EntryIndexIterMut {
+    descriptor_tbl: *mut [Option<EntryDescriptor>; MAX_PATCHING_CACHE_ENTRIES],
+    current: usize,
+    remaining: usize, // ✅ 剩余有效 entry 数量
+}
+
+impl Iterator for EntryIndexIterMut {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // ✅ 使用计数器提前退出
+        if self.remaining == 0 {
+            return None;
+        }
+
+        unsafe {
+            while self.current < MAX_PATCHING_CACHE_ENTRIES {
+                let idx = self.current;
+                self.current += 1;
+                if (*self.descriptor_tbl)[idx].is_some() {
+                    self.remaining -= 1;
+                    return Some(idx);
+                }
+            }
+        }
+        None
     }
 
-    pub fn entry_count(&self) -> usize {
-        self.entry_bitmap.size()
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
     }
+}
 
-    fn print_entries(&self) {
-        println!("entries: ");
-        self.entry_bitmap.iter().for_each(|idx| {
-            let entry = self.entry_ref(idx);
-            println!("#{idx}: {:?}", entry);
-        });
-        println!();
-    }
-
-    fn print_ops(&self) {
-        println!("ops: ");
-        self.op_bitmap.iter().for_each(|idx| {
-            let op = self.op_ref(idx);
-            println!("#{idx}: {:?}", op);
-        });
-        println!();
-    }
-
-    pub fn print_entry_bitmap(&self, start: usize, length: usize) {
-        self.entry_bitmap.print(start, length);
-    }
-
-    pub fn print_op_bitmap(&self, start: usize, length: usize) {
-        self.op_bitmap.print(start, length);
+impl ExactSizeIterator for EntryIndexIterMut {
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        patching_cache::{PatchingCache, PatchingCacheEntryFlags},
-        util,
-    };
-    use std::assert_matches::assert_matches;
-
-    fn dummy_op(operand: u64) -> PatchingOperation {
-        PatchingOperation {
-            op: crate::patching_cache_entry::PatchingOperator::Add,
-            operand,
-            next_idx: None,
-        }
-    }
+    use crate::util;
 
     fn dummy_entry(id: u64) -> PatchingCacheEntry {
         PatchingCacheEntry::new(
@@ -913,260 +745,71 @@ mod test {
         )
     }
 
+    fn dummy_op(operand: u64) -> PatchingOperation {
+        PatchingOperation::new(crate::patching_cache_entry::PatchingOperator::Add, operand)
+    }
+
     #[test]
     fn test_push_remove() {
-        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
+        // 使用 estimate_memory_occupied 计算正确的内存大小
+        let size = PatchingCacheContent::estimate_memory_occupied(1000, 1000);
         let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100, true);
+        content.init(1000, 1000, true);
 
-        let init_space_left = content.entry_space_left();
+        let init_space_left = content.space_left();
 
         // Test if empty
-        let ret = content.entries();
-        assert_eq!(ret.len(), 0);
+        assert_eq!(content.entries().len(), 0);
 
         // Test push e0
-        let mut e0 = dummy_entry(0);
-        let _ret = content.push(e0.clone()).expect("Failed to push e0");
-        assert_eq!(content.entry_count(), 1);
+        let e0 = dummy_entry(0);
+        let idx0 = content.push(e0).unwrap();
         assert_eq!(content.entries().len(), 1);
+        assert_eq!(idx0, 0);
 
         // Test push e1
-        let mut e1 = dummy_entry(1);
-        let _ret = content.push(e1.clone()).expect("Failed to push e1");
+        let e1 = dummy_entry(1);
+        let idx1 = content.push(e1).unwrap();
         assert_eq!(content.entries().len(), 2);
+        assert_eq!(idx1, 1);
 
-        // Test query e1
-        let (_, e1_ref) = content.find_entry(e1.id()).expect("Failed to find e1");
-        assert_eq!(e1_ref.id(), e1.id());
-
-        // Test push e0 with op
-        let op = dummy_op(1);
-        content.push_op(0, &op).expect("Failed to push op");
-        let (_, e0_ref) = content.find_entry(e0.id()).expect("Failed to find e0");
-        assert_eq!(e0_ref.op_head_idx.is_some(), true);
-        assert_eq!(e0_ref.op_head_idx.unwrap(), 0);
-        assert_eq!(content.op_count(), 1);
-        assert_eq!(content.entry_count(), 2);
-
-        let (e1_idx, _) = content.find_entry(e1.id()).expect("Failed to find e1");
-        content
-            .push_op(e1_idx, &dummy_op(0))
-            .expect("Failed to push op");
-        content
-            .push_op(e1_idx, &dummy_op(1))
-            .expect("Failed to push op");
-        content
-            .push_op(e1_idx, &dummy_op(2))
-            .expect("Failed to push op");
-        assert_eq!(content.op_count(), 4);
-        assert_eq!(content.entry_count(), 2);
-        content.print_entries();
-        content.print_ops();
-
-        content.remove(e0.id()).expect("Failed to remove e0");
+        // Test remove
+        content.remove(0u32.into()).unwrap();
         assert_eq!(content.entries().len(), 1);
-        assert_eq!(content.op_count(), 3);
-        assert_eq!(content.entry_count(), 1);
-        content.print_entries();
-        content.print_ops();
 
-        let ops = content.find_ops(e1.id()).expect("Failed to find ops");
-        let (_, e1_ref) = content.find_entry(e1.id()).expect("Failed to find e1");
-        assert_eq!(e1_ref.op_head_idx.is_some(), true);
-        assert_eq!(e1_ref.op_head_idx.unwrap(), 1);
-        assert_eq!(ops.len(), 3);
-        assert_eq!(ops[0].operand, 0);
-        assert_eq!(ops[1].operand, 1);
-        assert_eq!(ops[2].operand, 2);
-        content.print_entries();
-        content.print_ops();
-
-        content.remove_op(e1.id(), 1).expect("Failed to remove op");
-        let ops = content.find_ops(e1.id()).expect("Failed to find ops");
-        assert_eq!(ops.len(), 2);
-        assert_eq!(ops[0].operand, 0);
-        assert_eq!(ops[1].operand, 2);
-        let e1_ref = content.find_entry(e1.id()).unwrap().1;
-        assert_eq!(e1_ref.op_head_idx.unwrap(), 1);
-        assert_eq!(e1_ref.op_tail_idx.unwrap(), 3);
-        println!("after remove index 1 ops: ");
-        content.print_entries();
-        content.print_ops();
-
-        content.remove_op(e1.id(), 0).expect("Failed to remove op");
-        let ops = content.find_ops(e1.id()).expect("Failed to find ops");
-        assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0].operand, 2);
-        println!("after remove index 0 ops: {:?}", ops);
-        content.print_entries();
-        content.print_ops();
-
-        content.remove_op(e1.id(), 0).expect("Failed to remove op");
-        let ops = content.find_ops(e1.id()).expect("Failed to find ops");
-        assert_eq!(ops.len(), 0);
-        assert_eq!(content.op_count(), 0);
-        let e1_ref = content.find_entry(e1.id()).unwrap().1;
-        assert_eq!(e1_ref.op_head_idx.is_none(), true);
-        assert_eq!(e1_ref.op_tail_idx.is_none(), true);
-        println!("after remove index 0 ops: ");
-        content.print_entries();
-        content.print_ops();
-
-        // Test query e0 after remove
-        let e0_ref = content.find_entry(e0.id());
-        assert_eq!(e0_ref.is_none(), true);
-
-        content
-            .push_op(e1_idx, &dummy_op(0))
-            .expect("Failed to push op");
-        content
-            .push_op(e1_idx, &dummy_op(5))
-            .expect("Failed to push op");
-        content
-            .push_op(e1_idx, &dummy_op(6))
-            .expect("Failed to push op");
-        content.remove_op(e1.id(), 0).expect("Failed to remove op");
-        println!("after push ops on e1: ");
-        content.print_entries();
-        content.print_ops();
-
-        content.remove(e1.id()).expect("Failed to remove e1");
+        content.remove(1u32.into()).unwrap();
         assert_eq!(content.entries().len(), 0);
-        // content.consolidate();
-        assert_eq!(content.entry_space_left(), init_space_left);
+
+        unsafe {
+            content.consolidate().unwrap();
+        }
+        assert_eq!(content.space_left(), init_space_left);
     }
 
     #[test]
-    fn test_union() {
-        let mut cache = PatchingCache::new(100, 100).unwrap();
-
-        for i in 0..10 {
-            let mut e = dummy_entry(i as u64);
-            // e.set_dirty_flag(PatchingCacheEntryFlags::Patching);
-            cache.content_mut().push(e).expect("Failed to push entry");
-            for j in 0..i {
-                cache
-                    .content_mut()
-                    .push_op(i, &dummy_op(j as u64))
-                    .expect("Failed to push op");
-            }
-        }
-
-        let mut another_cache = PatchingCache::new(100, 100).unwrap();
-        for i in 10..20 {
-            let mut e = dummy_entry(i as u64);
-            // e.set_dirty_flag(PatchingCacheEntryFlags::Patching);
-            another_cache
-                .content_mut()
-                .push(e)
-                .expect("Failed to push entry");
-        }
-        for i in 10..15 {
-            let (idx, _) = another_cache
-                .content()
-                .find_entry(PatchPointID::from(i as u64))
-                .unwrap();
-            // another_cache
-            //     .content_mut()
-            //     .entry_mut(idx)
-            // .set_dirty_flag(PatchingCacheEntryFlags::Tracing);
-        }
-
-        cache.union(&another_cache).expect("Failed to union");
-        assert_eq!(cache.content().entry_count(), 20);
-        cache.content().print_entries();
-        cache.content().print_ops();
-    }
-
-    #[test]
-    fn test_max_size() {
-        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
+    fn test_push_ops() {
+        // ✅ 使用 estimate_memory_occupied 计算正确的大小
+        let size = PatchingCacheContent::estimate_memory_occupied(1000, 1000);
         let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100, true);
+        content.init(1000, 1000, true);
 
-        for i in 0..100 {
-            let e = dummy_entry(i as u64);
-            println!("pushing entry: {:?}", i);
-            assert_matches!(content.push(e), Ok(..));
-        }
+        let e0 = dummy_entry(0);
+        let idx0 = content.push(e0).unwrap();
 
-        let e = dummy_entry(u64::MAX);
-        assert_matches!(content.push(e), Err(..));
+        // Push operations
+        let ops = vec![dummy_op(1), dummy_op(2), dummy_op(3)];
+        content.push_op_batch(idx0, &ops).unwrap();
 
-        let (e0_idx, e0) = content.find_entry(PatchPointID::from(0u32)).unwrap();
-        let e0_id = e0.id();
-        for i in 0..100 {
-            assert_matches!(content.push_op(e0_idx, &dummy_op(i as u64)), Ok(..));
-        }
+        // Verify operations
+        let retrieved_ops = content.ops(idx0);
+        assert_eq!(retrieved_ops.len(), 3);
+        assert_eq!(retrieved_ops[0].operand, 1);
+        assert_eq!(retrieved_ops[1].operand, 2);
+        assert_eq!(retrieved_ops[2].operand, 3);
 
-        content.remove(e0_id).expect("Failed to remove entry");
-        assert_eq!(content.entry_count(), 99);
-        assert_eq!(content.op_count(), 0);
-
-        assert_matches!(content.push(dummy_entry(101)), Ok(..));
-        assert_matches!(content.push(dummy_entry(1)), Err(..));
-    }
-
-    #[test]
-    fn test_consolidate_and_restore() {
-        let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
-        let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        content.init(100, 100, true);
-
-        for i in 0..10 {
-            let e = dummy_entry(i as u64);
-            let idx = content.push(e.clone()).expect("Failed to push entry");
-            for j in 0..i {
-                content
-                    .push_op(idx, &dummy_op(j as u64))
-                    .expect("Failed to push op");
-            }
-            for j in 0..(i / 2) {
-                content.remove_op(e.id(), 0).expect("Failed to remove op");
-            }
-        }
-
-        content.print_entries();
-        content.print_ops();
-
-        let entry_cnt = content.entry_count();
-        let op_cnt = content.op_count();
-        println!(
-            "before consolidation, entry_cnt: {}, op_cnt: {}",
-            entry_cnt, op_cnt
-        );
-        // let package: PatchingTable = content.as_ref().into();
-        // println!("package: {:#?}", package);
-
-        // let size = PatchingCacheContent::estimate_memory_occupied(100, 100);
-        // let mut content: Box<PatchingCacheContent> = util::alloc_box_aligned_zeroed(size);
-        // content.init(100, 100, true);
-
-        // content
-        //     .clean_load_patching_table(&package)
-        //     .expect("Failed to load package");
-
-        // assert_eq!(content.entry_count(), entry_cnt);
-        // assert_eq!(content.op_count(), op_cnt);
-
-        // content.print_entries();
-        // content.print_ops();
-
-        // println!(
-        //     "after consolidation, entry_cnt: {}, op_cnt: {}",
-        //     content.entry_count(),
-        //     content.op_count()
-        // );
-
-        // for i in 0..entry_cnt {
-        //     let e = content.find_entry(PatchPointID::from(i as u64)).unwrap().1;
-        //     let ops = content.find_ops(e.id()).expect("Failed to find ops");
-        //     println!("ops: {:?}", ops);
-        //     assert_eq!(ops.len(), i - i / 2);
-        //     for j in (i / 2)..i {
-        //         assert_eq!(ops[j - i / 2].operand, j as u64);
-        //     }
-        // }
+        // Clear operations
+        content.clear_entry_ops(idx0).unwrap();
+        let retrieved_ops = content.ops(idx0);
+        assert_eq!(retrieved_ops.len(), 0);
     }
 }

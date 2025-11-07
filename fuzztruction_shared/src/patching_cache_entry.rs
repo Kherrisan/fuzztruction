@@ -2,7 +2,7 @@ use llvm_stackmap::LocationType;
 use memoffset::offset_of;
 use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
-use strum_macros::{EnumString};
+use strum_macros::EnumString;
 
 use crate::{
     dwarf::{self, DwarfReg},
@@ -12,8 +12,6 @@ use crate::{
     util,
 };
 use std::alloc;
-
-const MAX_OP_COUNT: usize = 1024 * 1024 * 64;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
