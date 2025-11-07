@@ -843,7 +843,7 @@ impl PatchingCacheContent {
 
         let (idx, _) = res.unwrap();
 
-        self.clear_entry_ops(idx)?;
+        // self.clear_entry_ops(idx)?;
         self.remove_entry_idx(idx)?;
 
         Ok(idx)

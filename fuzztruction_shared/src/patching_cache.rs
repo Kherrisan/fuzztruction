@@ -797,13 +797,13 @@ impl PatchingCache {
     /// 单次遍历优化版本：使用双指针算法一次性处理所有flags
     fn replace_single_pass(&mut self, other: &PatchingCache) -> Result<()> {
         log::trace!("Replacing all flags in single pass");
-        
+
         // 收集需要添加的新条目，避免遍历时修改BTreeMap
         let mut entries_to_add: Vec<(PatchingCacheEntry, Vec<PatchingOperation>)> = Vec::new();
-        
+
         let mut self_iter = self.b_tree.as_ref().unwrap().iter().peekable();
         let mut other_iter = other.b_tree.as_ref().unwrap().iter().peekable();
-        
+
         loop {
             match (self_iter.peek(), other_iter.peek()) {
                 (Some((self_pp_id, self_idx)), Some((other_pp_id, other_idx))) => {
@@ -813,7 +813,7 @@ impl PatchingCache {
                             let self_entry = self.content().entry_mut(**self_idx);
                             let other_entry = other.content().entry_ref(**other_idx);
                             Self::process_intersected_entry_all_flags(self_entry, other_entry);
-                            
+
                             self_iter.next();
                             other_iter.next();
                         }
@@ -821,7 +821,7 @@ impl PatchingCache {
                             // 只在self中存在的条目
                             let self_entry = self.content().entry_mut(**self_idx);
                             Self::process_self_only_entry_all_flags(self_entry);
-                            
+
                             self_iter.next();
                         }
                         std::cmp::Ordering::Greater => {
@@ -831,7 +831,7 @@ impl PatchingCache {
                                 let ops = other.content().ops(**other_idx);
                                 entries_to_add.push((other_entry, ops));
                             }
-                            
+
                             other_iter.next();
                         }
                     }
@@ -857,23 +857,11 @@ impl PatchingCache {
                 }
             }
         }
-        
+
         // 批量添加收集的条目
         for (entry, ops) in entries_to_add {
             self.push(entry, ops)?;
         }
-        
-        Ok(())
-    }
-
-    /// 传统四次遍历版本（保留用于对比测试）
-    #[allow(dead_code)]
-    #[deprecated(since = "2025-09-07", note = "Use replace_single_pass instead")]
-    fn replace_four_pass(&mut self, other: &PatchingCache) -> Result<()> {
-        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::Tracing)?;
-        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::TracingVal)?;
-        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::Patching)?;
-        self.replace_with_dirty_flag(other, PatchingCacheEntryFlags::Jumping)?;
 
         Ok(())
     }
@@ -1008,7 +996,7 @@ impl PatchingCache {
 
             if let Some(&other_idx) = other.b_tree.as_ref().unwrap().get(&pp_id) {
                 other_pp_ids.remove(&other_idx);
-                
+
                 // Current cache could also be found from the other cache.
                 let other_entry = other.content().entry_ref(other_idx);
                 Self::process_intersected_entry_flag(entry, other_entry, flag);
@@ -1045,23 +1033,24 @@ impl PatchingCache {
     /// Union操作的双指针优化版本：使用双指针算法一次性处理所有flags
     fn union_single_pass(&mut self, other: &PatchingCache) -> Result<()> {
         log::trace!("Unioning all flags with dual-pointer algorithm in single pass");
-        
+
         // 收集需要添加的新条目，避免遍历时修改BTreeMap
         let mut entries_to_add: Vec<(PatchingCacheEntry, Vec<PatchingOperation>)> = Vec::new();
         // 收集需要处理patching操作的条目信息
-        let mut patching_operations_to_handle: Vec<(usize, usize, PatchingCacheEntryFlags)> = Vec::new();
+        let mut patching_operations_to_handle: Vec<(usize, usize, PatchingCacheEntryFlags)> =
+            Vec::new();
         let mut any_dirty = false;
-        
+
         const FLAGS: [PatchingCacheEntryFlags; 4] = [
             PatchingCacheEntryFlags::Tracing,
             PatchingCacheEntryFlags::TracingVal,
             PatchingCacheEntryFlags::Patching,
             PatchingCacheEntryFlags::Jumping,
         ];
-        
+
         let mut self_iter = self.b_tree.as_ref().unwrap().iter().peekable();
         let mut other_iter = other.b_tree.as_ref().unwrap().iter().peekable();
-        
+
         loop {
             match (self_iter.peek(), other_iter.peek()) {
                 (Some((self_pp_id, self_idx)), Some((other_pp_id, other_idx))) => {
@@ -1069,12 +1058,16 @@ impl PatchingCache {
                         std::cmp::Ordering::Equal => {
                             // 交集：同时存在于两个缓存中的条目
                             let other_entry = other.content().entry_ref(**other_idx);
-                            
+
                             // 检查other中是否有dirty flags
-                            let has_dirty_flags = FLAGS.iter().any(|&flag| other_entry.is_dirty(flag));
+                            let has_dirty_flags =
+                                FLAGS.iter().any(|&flag| other_entry.is_dirty(flag));
                             if has_dirty_flags {
                                 let self_entry = self.content().entry_mut(**self_idx);
-                                let set_dirty = Self::process_union_intersected_entry_all_flags(self_entry, other_entry);
+                                let set_dirty = Self::process_union_intersected_entry_all_flags(
+                                    self_entry,
+                                    other_entry,
+                                );
 
                                 // 检查冲突：patching和jumping不能同时设置
                                 if self_entry.is_dirty(PatchingCacheEntryFlags::Patching)
@@ -1089,7 +1082,11 @@ impl PatchingCache {
                                 // 收集需要处理patching操作的信息
                                 for &flag in &FLAGS {
                                     if other_entry.is_dirty(flag) {
-                                        patching_operations_to_handle.push((**self_idx, **other_idx, flag));
+                                        patching_operations_to_handle.push((
+                                            **self_idx,
+                                            **other_idx,
+                                            flag,
+                                        ));
                                     }
                                 }
 
@@ -1097,7 +1094,7 @@ impl PatchingCache {
                                     any_dirty = true;
                                 }
                             }
-                            
+
                             self_iter.next();
                             other_iter.next();
                         }
@@ -1108,9 +1105,10 @@ impl PatchingCache {
                         std::cmp::Ordering::Greater => {
                             // 只在other中存在的条目
                             let other_entry = other.content().entry_ref(**other_idx);
-                            
+
                             // 检查是否有dirty flags需要添加
-                            let has_dirty_flags = FLAGS.iter().any(|&flag| other_entry.is_dirty(flag));
+                            let has_dirty_flags =
+                                FLAGS.iter().any(|&flag| other_entry.is_dirty(flag));
                             if has_dirty_flags {
                                 let mut new_entry = other_entry.clone();
                                 if Self::should_add_union_entry_all_flags(&mut new_entry) {
@@ -1119,7 +1117,7 @@ impl PatchingCache {
                                     any_dirty = true;
                                 }
                             }
-                            
+
                             other_iter.next();
                         }
                     }
@@ -1131,7 +1129,7 @@ impl PatchingCache {
                 (None, Some((_, other_idx))) => {
                     // 剩余的other条目
                     let other_entry = other.content().entry_ref(**other_idx);
-                    
+
                     // 检查是否有dirty flags需要添加
                     let has_dirty_flags = FLAGS.iter().any(|&flag| other_entry.is_dirty(flag));
                     if has_dirty_flags {
@@ -1142,7 +1140,7 @@ impl PatchingCache {
                             any_dirty = true;
                         }
                     }
-                    
+
                     other_iter.next();
                 }
                 (None, None) => {
@@ -1151,21 +1149,21 @@ impl PatchingCache {
                 }
             }
         }
-        
+
         // 批量处理patching操作
         for (self_idx, other_idx, flag) in patching_operations_to_handle {
             self.handle_union_patching_operations(self_idx, other_idx, other, flag)?;
         }
-        
+
         // 批量添加收集的条目
         for (entry, ops) in entries_to_add {
             self.push(entry, ops)?;
         }
-        
+
         if any_dirty {
             self.dirty = true;
         }
-        
+
         Ok(())
     }
 
@@ -1190,7 +1188,7 @@ impl PatchingCache {
         if !other_entry.is_dirty(flag) {
             return false;
         }
-        
+
         let mut set_dirty = false;
         match self_entry.flag(flag) {
             PatchingCacheEntryDirty::Clear => {
@@ -1203,10 +1201,10 @@ impl PatchingCache {
             }
             PatchingCacheEntryDirty::Enable => {}
         }
-        
+
         set_dirty
     }
-    
+
     /// 检查union操作中的新条目：只在other中存在的脏条目
     fn should_add_union_entry_flag(
         other_entry: &mut PatchingCacheEntry,
@@ -1219,7 +1217,7 @@ impl PatchingCache {
             false
         }
     }
-    
+
     /// 处理所有flags的union交集条目
     fn process_union_intersected_entry_all_flags(
         self_entry: &mut PatchingCacheEntry,
@@ -1238,10 +1236,10 @@ impl PatchingCache {
                 any_set_dirty = true;
             }
         }
-        
+
         any_set_dirty
     }
-    
+
     /// 检查所有flags的union新条目
     fn should_add_union_entry_all_flags(other_entry: &mut PatchingCacheEntry) -> bool {
         const FLAGS: [PatchingCacheEntryFlags; 4] = [
@@ -1259,7 +1257,7 @@ impl PatchingCache {
         }
         should_add
     }
-    
+
     /// 处理patching操作的特殊逻辑
     fn handle_union_patching_operations(
         &mut self,
@@ -1303,7 +1301,8 @@ impl PatchingCache {
 
             let set_dirty = if let Some(&idx) = self.b_tree.as_ref().unwrap().get(&pp_id) {
                 let entry = self.content().entry_mut(idx);
-                let set_dirty = Self::process_union_intersected_entry_flag(entry, other_entry, flag);
+                let set_dirty =
+                    Self::process_union_intersected_entry_flag(entry, other_entry, flag);
 
                 // 检查冲突：patching和jumping不能同时设置
                 if entry.is_dirty(PatchingCacheEntryFlags::Patching)
@@ -1388,21 +1387,43 @@ impl PatchingCache {
         self
     }
 
-    pub fn remove_cleared_entries(&mut self) -> usize {
+    pub fn release_nop(&mut self) -> usize {
         self.entries_mut().iter_mut().for_each(|e| {
             e.set_by(PatchingCacheEntryDirty::Clear, PatchingCacheEntryDirty::Nop);
         });
-        self.retain(|e| {
-            if e.is_all(PatchingCacheEntryDirty::Nop) {
-                false
-            } else if e.is_any(PatchingCacheEntryDirty::Enable) {
-                true
-            } else {
-                // only nop and clear
-                // in fact, clear would be set to nop just before, so it will not happen
-                false
-            }
-        })
+        let removing_entries_ids = self
+            .entries()
+            .iter()
+            .filter(|e| {
+                if e.is_all(PatchingCacheEntryDirty::Nop) {
+                    true
+                } else if e.is_any(PatchingCacheEntryDirty::Enable) {
+                    false
+                } else {
+                    // only nop and clear
+                    // in fact, clear would be set to nop just before, so it will not happen
+                    true
+                }
+            })
+            .map(|e| e.id().clone())
+            .collect::<Vec<_>>();
+
+        removing_entries_ids.iter().for_each(|id| {
+            self.remove(*id).unwrap();
+        });
+
+        removing_entries_ids.len()
+        // self.retain(|e| {
+        //     if e.is_all(PatchingCacheEntryDirty::Nop) {
+        //         false
+        //     } else if e.is_any(PatchingCacheEntryDirty::Enable) {
+        //         true
+        //     } else {
+        //         // only nop and clear
+        //         // in fact, clear would be set to nop just before, so it will not happen
+        //         false
+        //     }
+        // })
     }
 }
 
