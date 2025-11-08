@@ -334,6 +334,124 @@ pub fn set_core_dumpable() -> Result<()> {
     }
 }
 
+// 在 util.rs 中添加
+pub fn print_detailed_memory_stats() {
+    let pid = unsafe { libc::getpid() };
+    let status_path = format!("/proc/{}/status", pid);
+    
+    if let Ok(content) = std::fs::read_to_string(&status_path) {
+        println!("=== Detailed Memory Statistics ===");
+        
+        let keys = [
+            "VmSize",   // 虚拟内存大小
+            "VmRSS",    // 实际物理内存
+            "VmData",   // 数据段
+            "VmStk",    // 栈
+            "VmExe",    // 可执行代码
+            "VmLib",    // 共享库
+            "VmPTE",    // 页表
+            "VmSwap",   // 交换空间
+            "RssAnon",  // 匿名页面（堆、栈）
+            "RssFile",  // 文件映射页面
+            "RssShmem", // 共享内存页面
+        ];
+        
+        for line in content.lines() {
+            for key in &keys {
+                if line.starts_with(key) {
+                    println!("{}", line);
+                    break;
+                }
+            }
+        }
+        
+        println!("===================================");
+    }
+    
+    // 计算页面数量
+    if let Ok(content) = std::fs::read_to_string(&status_path) {
+        for line in content.lines() {
+            if line.starts_with("VmRSS:") {
+                if let Some(kb_str) = line.split_whitespace().nth(1) {
+                    if let Ok(kb) = kb_str.parse::<usize>() {
+                        let pages = kb / 4;  // 假设 4KB 页面
+                        println!("Approximate page count: {} pages", pages);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn print_memory_maps_count() {
+    let pid = unsafe { libc::getpid() };
+    let maps_path = format!("/proc/{}/maps", pid);
+    
+    if let Ok(content) = std::fs::read_to_string(&maps_path) {
+        let count = content.lines().count();
+        println!("Memory mappings count: {}", count);
+        
+        // 按类型分组统计
+        let mut heap_count = 0;
+        let mut anon_count = 0;
+        let mut file_count = 0;
+        
+        for line in content.lines() {
+            if line.contains("[heap]") {
+                heap_count += 1;
+            } else if line.contains("[anon") {
+                anon_count += 1;
+            } else if !line.contains("[") {
+                file_count += 1;
+            }
+        }
+        
+        println!("  - Heap mappings: {}", heap_count);
+        println!("  - Anonymous mappings: {}", anon_count);
+        println!("  - File mappings: {}", file_count);
+    }
+}
+
+pub fn print_process_memory_usage() {
+    use std::fs;
+    use std::io::Read;
+    
+    let pid = unsafe { libc::getpid() };
+    let status_path = format!("/proc/{}/status", pid);
+    
+    // 读取 /proc/pid/status 文件
+    let mut content = String::new();
+    if let Ok(mut file) = fs::File::open(&status_path) {
+        if file.read_to_string(&mut content).is_err() {
+            eprintln!("Failed to read {}", status_path);
+            return;
+        }
+    } else {
+        eprintln!("Failed to open {}", status_path);
+        return;
+    }
+    
+    println!("=== Process Memory Usage (PID: {}) ===", pid);
+    
+    // 查找并打印相关的内存信息
+    let keys = ["VmSize", "VmRSS", "VmPTE", "VmData", "VmStk", "VmExe", "VmLib"];
+    
+    for line in content.lines() {
+        for key in &keys {
+            if line.starts_with(key) {
+                // 解析行格式: "VmSize:    123456 kB"
+                if let Some(parts) = line.split_once(':') {
+                    let value = parts.1.trim();
+                    println!("  {:12} {}", format!("{}:", parts.0), value);
+                }
+                break;
+            }
+        }
+    }
+    
+    println!("=====================================");
+}
+
 /**
  * Read random data from /dev/random
  */
@@ -351,6 +469,11 @@ pub fn read_random_dev(size: usize) -> Vec<u8> {
 mod test {
     use super::*;
     use std::slice;
+
+    #[test]
+    fn test_print_process_memory_usage() {
+        print_process_memory_usage();
+    }
 
     #[test]
     fn test_alloc_box_aligned() {

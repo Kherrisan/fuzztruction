@@ -6,6 +6,7 @@ use std::{
     fmt::Debug,
     mem::{self},
     slice,
+    time::Instant,
 };
 
 use anyhow::Result;
@@ -137,6 +138,8 @@ pub struct PatchingCache {
     content_size: usize,
     content: PatchingCacheContentRawPtr,
     dirty: bool,
+    /// ✅ O(1) 查找：id -> entry_idx 映射
+    id_to_idx: HashMap<PatchPointID, usize>,
 }
 
 impl Debug for PatchingCache {
@@ -181,7 +184,7 @@ impl Clone for PatchingCache {
         let mutation_cache_content =
             unsafe { &mut *(memory.as_mut() as *mut PatchingCacheContent) };
 
-        let new_cache = PatchingCache {
+        let mut new_cache = PatchingCache {
             backing_memory: backing_memory::Memory::HeapMemory(backing_memory::HeapMemory {
                 memory,
                 size,
@@ -189,7 +192,11 @@ impl Clone for PatchingCache {
             content_size: size,
             content: PatchingCacheContentRawPtr(mutation_cache_content),
             dirty: self.dirty,
+            id_to_idx: HashMap::new(), // ✅ 初始化空的映射
         };
+
+        // ✅ 重建 HashMap
+        new_cache.rebuild_id_to_idx_map();
 
         new_cache
     }
@@ -513,7 +520,7 @@ impl PatchingCache {
                 create,
             );
 
-            return Ok(PatchingCache {
+            let mut cache = PatchingCache {
                 backing_memory: backing_memory::Memory::ShmMemory(backing_memory::ShmMemory {
                     shm_fd: fd,
                     shm_path: name_c,
@@ -523,7 +530,15 @@ impl PatchingCache {
                 content_size: size,
                 content: PatchingCacheContentRawPtr(ptr),
                 dirty: false,
-            });
+                id_to_idx: HashMap::new(), // ✅ 初始化空的映射
+            };
+
+            // ✅ 如果不是 create 模式，说明是从已有的 shm 加载，需要重建 HashMap
+            if !create {
+                cache.rebuild_id_to_idx_map();
+            }
+
+            return Ok(cache);
         };
     }
 
@@ -577,6 +592,7 @@ impl PatchingCache {
             content_size: size,
             content: PatchingCacheContentRawPtr(mutation_cache_content),
             dirty: false,
+            id_to_idx: HashMap::new(), // ✅ 初始化空的映射
         });
     }
 
@@ -650,24 +666,118 @@ impl PatchingCache {
         });
     }
 
+    /// ✅ O(1) 查找：使用 HashMap 加速
     pub fn get(&self, pp: PatchPointID) -> Option<&PatchingCacheEntry> {
-        self.content().find_entry(pp).map(|(_, entry)| entry)
+        if let Some(&idx) = self.id_to_idx.get(&pp) {
+            self.content().entry_ref_opt(idx)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, pp: PatchPointID) -> Option<&mut PatchingCacheEntry> {
+        if let Some(&idx) = self.id_to_idx.get(&pp) {
+            self.content_mut().entry_mut_opt(idx)
+        } else {
+            None
+        }
+    }
+
+    /// 重建 id -> idx 映射（在 clone/load/consolidate 时调用）
+    fn rebuild_id_to_idx_map(&mut self) {
+        self.id_to_idx.clear();
+        for idx in self.content().iter() {
+            let entry = self.content().entry_ref(idx);
+            self.id_to_idx.insert(entry.id(), idx);
+        }
+    }
+
+    /// ✅ 检查是否发生了 consolidate，如果是则重建 HashMap
+    fn rebuild_if_invalidated(&mut self) {
+        if self.content().is_invalidated() {
+            self.rebuild_id_to_idx_map();
+            self.content_mut().clear_invalidated();
+        }
     }
 
     pub fn push(&mut self, entry: PatchingCacheEntry, ops: Vec<PatchingOperation>) -> Result<()> {
-        self.content_mut().push(entry).and_then(|idx| {
+        let id = entry.id(); // ✅ 保存 id 用于 HashMap
+        let result = self.content_mut().push(entry).and_then(|idx| {
             if ops.len() > 0 {
                 self.content_mut().push_op_batch(idx, &ops)?;
             }
+            // ✅ 维护 HashMap
+            self.id_to_idx.insert(id, idx);
             Ok(())
-        })
+        });
+
+        // ✅ push 可能触发 consolidate（空间不足时），需要检查并重建
+        self.rebuild_if_invalidated();
+
+        result
+    }
+
+    /// ✅ O(1) 备份：使用 HashMap 加速查找
+    pub fn backup_entries_by_ids(
+        &self,
+        ids: &HashSet<PatchPointID>,
+    ) -> Vec<(PatchingCacheEntry, Vec<PatchingOperation>)> {
+        let mut backup = Vec::new();
+
+        for id in ids {
+            if let Some(&idx) = self.id_to_idx.get(id) {
+                if let Some(entry) = self.content().entry_ref_opt(idx) {
+                    let entry_clone = entry.clone();
+                    let ops = self.content().ops(idx);
+                    backup.push((entry_clone, ops));
+                }
+            }
+        }
+
+        backup
     }
 
     /// Remove the [MutationCacheEntry] with the given `id` .
     /// !!! This will invalidate all references to the cached entries !!!
-    // pub fn remove(&mut self, id: PatchPointID) -> Result<()> {
-    //     self.content_mut().remove(id)
-    // }
+    pub fn remove(&mut self, id: PatchPointID) -> Result<()> {
+        // ✅ 先从 HashMap 中移除
+        self.id_to_idx.remove(&id);
+        let result = self.content_mut().remove(id);
+
+        // ✅ remove 可能触发 consolidate（删除数量达到阈值时），需要检查并重建
+        self.rebuild_if_invalidated();
+
+        result
+    }
+
+    /// 删除指定 IDs 的 entries，并恢复备份的 entries
+    pub fn remove_and_restore_entries(
+        &mut self,
+        ids_to_remove: &HashSet<PatchPointID>,
+        entries_to_restore: Vec<(PatchingCacheEntry, Vec<PatchingOperation>)>,
+    ) -> Result<()> {
+        // 1. 删除指定的 IDs（直接操作 content，避免每次都检查 invalidate）
+        for id in ids_to_remove {
+            self.id_to_idx.remove(id);
+            let _ = self.content_mut().remove(*id); // 忽略不存在的情况
+        }
+
+        // 2. 恢复备份的 entries（直接操作 content，避免每次都检查 invalidate）
+        for (entry, ops) in entries_to_restore {
+            let id = entry.id();
+            if let Ok(idx) = self.content_mut().push(entry) {
+                if !ops.is_empty() {
+                    let _ = self.content_mut().push_op_batch(idx, &ops);
+                }
+                self.id_to_idx.insert(id, idx);
+            }
+        }
+
+        // ✅ 批量操作后统一检查并重建
+        self.rebuild_if_invalidated();
+
+        Ok(())
+    }
 
     /// Clears the content of the cache.
     pub fn clear(&mut self) {
@@ -817,7 +927,12 @@ impl PatchingCache {
     where
         F: FnMut(&mut PatchingCacheEntry) -> bool,
     {
-        self.content_mut().retain(f)
+        let removed = self.content_mut().retain(f);
+
+        // ✅ retain 可能触发 consolidate（删除数量达到阈值时），需要检查并重建
+        self.rebuild_if_invalidated();
+
+        removed
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &PatchingCacheEntry> {

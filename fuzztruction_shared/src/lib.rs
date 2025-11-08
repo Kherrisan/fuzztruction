@@ -24,13 +24,15 @@ pub mod log_utils;
 
 pub mod eval;
 
-pub mod tracing;
 pub mod shared_memory;
+pub mod tracing;
 
-pub mod serializer;
 pub mod finite_integer_set;
 pub mod patchpoint;
-pub mod var;
+pub mod serializer;
+
 pub mod func;
-pub mod func_block_addr;
 pub mod func_addr;
+pub mod func_block_addr;
+pub mod patchpoint_flat;
+pub mod var;

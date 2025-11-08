@@ -276,6 +276,10 @@ impl PatchPoint {
         self.llvm_id
     }
 
+    pub fn func_idx(&self) -> u32 {
+        self.ir.as_ref().unwrap().func_idx
+    }
+
     pub fn id(&self) -> PatchPointID {
         self.id
     }

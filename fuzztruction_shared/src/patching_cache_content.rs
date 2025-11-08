@@ -220,6 +220,19 @@ impl PatchingCacheContent {
         unsafe { self.entry_ref_by_offset(desc.start_offset) }
     }
 
+    /// ✅ 安全版本：返回 Option
+    pub fn entry_ref_opt(&self, idx: usize) -> Option<&PatchingCacheEntry> {
+        self.entry_descriptor_tbl.get(idx)?.as_ref().map(|desc| {
+            unsafe { self.entry_ref_by_offset(desc.start_offset) }
+        })
+    }
+
+    pub fn entry_mut_opt(&mut self, idx: usize) -> Option<&mut PatchingCacheEntry> {
+        self.entry_descriptor_tbl.get(idx)?.as_ref().map(|desc| {
+            unsafe { self.entry_mut_by_offset(desc.start_offset) }
+        })
+    }
+
     /// 通过索引获取 entry 可变引用
     pub fn entry_mut(&self, idx: usize) -> &mut PatchingCacheEntry {
         let desc = self.entry_descriptor_tbl[idx]
@@ -333,7 +346,6 @@ impl PatchingCacheContent {
         }
 
         self.entry_current_data_size += entry_size;
-        self.invalidate = true;
 
         // ✅ 当空间利用率过高时，触发 consolidate
         if self.space_left() < self.total_space() / 10 {
@@ -403,7 +415,6 @@ impl PatchingCacheContent {
             }
         }
 
-        self.invalidate = true;
         Ok(())
     }
 
@@ -474,7 +485,6 @@ impl PatchingCacheContent {
         self.entry_descriptor_tbl[entry_idx] = None;
         self.entry_pending_deletions += 1;
         self.entry_valid_count = self.entry_valid_count.saturating_sub(1); // ✅ 减少有效 entry 计数
-        self.invalidate = true;
 
         // 达到阈值时压缩
         if self.entry_pending_deletions > PENDING_DELETIONS_LIMIT {
@@ -591,7 +601,6 @@ impl PatchingCacheContent {
             }
         }
 
-        self.invalidate = true;
         removed_count
     }
 
