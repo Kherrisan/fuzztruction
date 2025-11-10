@@ -1482,6 +1482,10 @@ impl PatchingCache {
         log::trace!("Removed {} entries from patching cache", removed_count);
         removed_count
     }
+
+    pub fn first(&self) -> &PatchingCacheEntry {
+        self.content().entry_ref(0)
+    }
 }
 
 impl PatchingCache {

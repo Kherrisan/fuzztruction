@@ -20,6 +20,7 @@
 //! └──────────────────────────────────────────────────┘
 //! ```
 
+use crate::constants::ENV_PP_SHM;
 use crate::patchpoint::PatchPoint;
 use crate::types::PatchPointID;
 use crate::var::VarType;
@@ -28,6 +29,7 @@ use derive_more::Display;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ptr;
+use std::time::Instant;
 
 /// 共享内存头部
 #[repr(C)]
@@ -199,6 +201,16 @@ impl PatchPointFlat {
 
         unsafe {
             let liveout_ptr = vardata_base.add(self.liveout_offset as usize) as *const LiveOutFlat;
+            // println!("vardata_base: {:#x}", vardata_base as usize);
+            // println!("self.liveout_offset: {}", self.liveout_offset);
+            // println!("self.liveout_count: {}", self.liveout_count);
+            // 打印内存字节用于调试
+            // let byte_ptr = liveout_ptr as *const u8;
+            // print!("LiveOut memory bytes: ");
+            // for i in 0..(self.liveout_count as usize * std::mem::size_of::<LiveOutFlat>()) {
+            //     print!("{:02x} ", *byte_ptr.add(i));
+            // }
+            // println!();
             std::slice::from_raw_parts(liveout_ptr, self.liveout_count as usize)
         }
     }
@@ -326,7 +338,7 @@ impl PatchPointCache {
 
     /// 从环境变量打开
     pub fn open_from_env() -> Result<Self> {
-        let shm_name = std::env::var("PINGU_PP_SHM_NAME").context("PINGU_PP_SHM_NAME not set")?;
+        let shm_name = std::env::var(ENV_PP_SHM).context(format!("{ENV_PP_SHM} not set"))?;
         Self::open(&shm_name)
     }
 
@@ -498,10 +510,19 @@ impl PatchPointCacheBuilder {
     }
 
     pub fn from(patchpoints: &Vec<&PatchPoint>) -> Result<Self> {
+        let start = Instant::now();
+
         let mut builder = Self::new();
         for pp in patchpoints {
             builder.add(pp);
         }
+
+        let end = Instant::now();
+        log::info!(
+            "Time taken to build PatchPointCache: {:?}",
+            end.duration_since(start)
+        );
+        
         Ok(builder)
     }
 
@@ -516,6 +537,12 @@ impl PatchPointCacheBuilder {
 
         // 2. 处理 LiveOuts
         let live_outs_vec = pp.live_outs();
+        let liveout_align = std::mem::align_of::<LiveOutFlat>();
+        let padding = (liveout_align - (self.vardata.len() % liveout_align)) % liveout_align;
+        if padding != 0 {
+            self.vardata.resize(self.vardata.len() + padding, 0);
+        }
+
         let liveout_offset = self.vardata.len() as u32;
         let liveout_count = live_outs_vec.len().min(255) as u8;
 

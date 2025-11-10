@@ -4,4 +4,5 @@ pub const ENV_FT_SET_SHM: &str = "FT_SET_SHM";
 pub const ENV_LOG_LEVEL: &str = "FT_LOG_LEVEL";
 pub const ENV_STATE_DIR: &str = "FT_STATE_DIR";
 pub const ENV_WORK_DIR: &str = "FT_WORK_DIR";
+pub const ENV_PP_SHM: &str = "PINGU_PP_SHM";
 pub const MAX_PATCHPOINT_CNT: usize = 400_000;
