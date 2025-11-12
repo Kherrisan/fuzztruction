@@ -1,8 +1,10 @@
 pub const PATCH_POINT_SIZE: usize = 32;
-pub const ENV_SHM_NAME: &str = "FT_SHM_NAME";
+pub const ENV_PC_SHM: &str = "PINGU_SHM_NAME";
 pub const ENV_FT_SET_SHM: &str = "FT_SET_SHM";
 pub const ENV_LOG_LEVEL: &str = "FT_LOG_LEVEL";
 pub const ENV_STATE_DIR: &str = "FT_STATE_DIR";
 pub const ENV_WORK_DIR: &str = "FT_WORK_DIR";
 pub const ENV_PP_SHM: &str = "PINGU_PP_SHM";
+pub const ENV_MQ_SEND_SHM: &str = "PINGU_MQ_SEND_SHM";
+pub const ENV_MQ_RECV_SHM: &str = "PINGU_MQ_RECV_SHM";
 pub const MAX_PATCHPOINT_CNT: usize = 400_000;

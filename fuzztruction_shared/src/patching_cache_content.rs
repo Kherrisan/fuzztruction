@@ -222,15 +222,17 @@ impl PatchingCacheContent {
 
     /// ✅ 安全版本：返回 Option
     pub fn entry_ref_opt(&self, idx: usize) -> Option<&PatchingCacheEntry> {
-        self.entry_descriptor_tbl.get(idx)?.as_ref().map(|desc| {
-            unsafe { self.entry_ref_by_offset(desc.start_offset) }
-        })
+        self.entry_descriptor_tbl
+            .get(idx)?
+            .as_ref()
+            .map(|desc| unsafe { self.entry_ref_by_offset(desc.start_offset) })
     }
 
     pub fn entry_mut_opt(&mut self, idx: usize) -> Option<&mut PatchingCacheEntry> {
-        self.entry_descriptor_tbl.get(idx)?.as_ref().map(|desc| {
-            unsafe { self.entry_mut_by_offset(desc.start_offset) }
-        })
+        self.entry_descriptor_tbl
+            .get(idx)?
+            .as_ref()
+            .map(|desc| unsafe { self.entry_mut_by_offset(desc.start_offset) })
     }
 
     /// 通过索引获取 entry 可变引用
@@ -743,15 +745,7 @@ mod test {
     use crate::util;
 
     fn dummy_entry(id: u64) -> PatchingCacheEntry {
-        PatchingCacheEntry::new(
-            id.into(),
-            0,
-            llvm_stackmap::LocationType::Constant,
-            8,
-            crate::dwarf::DwarfReg::Rax,
-            0,
-            0,
-        )
+        PatchingCacheEntry::new(id.into())
     }
 
     fn dummy_op(operand: u64) -> PatchingOperation {

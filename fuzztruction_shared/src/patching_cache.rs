@@ -21,7 +21,7 @@ use strum_macros::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 
 use crate::{
-    constants::ENV_SHM_NAME,
+    constants::ENV_PC_SHM,
     patching_cache_content::{EntryIndexIter, EntryIndexIterMut, PatchingCacheContent},
     patching_cache_entry::{
         PatchingCacheEntry, PatchingCacheEntryDirty, PatchingOperation, flags_to_str,
@@ -553,17 +553,17 @@ impl PatchingCache {
     }
 
     pub fn open_shm_from_env() -> Result<PatchingCache> {
-        let send_name = env::var(ENV_SHM_NAME);
+        let send_name = env::var(ENV_PC_SHM);
         match send_name {
             Err(_) => Err(PatchingCacheError::ShmNotFound(format!(
                 "Failed to find environment variable {}",
-                ENV_SHM_NAME
+                ENV_PC_SHM
             )))?,
             Ok(name) => PatchingCache::open_shm(&name),
         }
     }
 
-    pub fn unlink(&mut self) {
+    pub fn unlink(&self) {
         if let Some(name) = self.shm_name() {
             let name = CString::new(name).unwrap();
             unsafe {
@@ -790,9 +790,9 @@ impl PatchingCache {
 
     /// 重置所有 entry 的 op_idx 到其 operation 链表头部
     /// 这在执行开始时调用，确保每个 entry 从第一个 operation 开始执行
-    pub fn reset_all_entry_op(&mut self) {
-        self.entries_mut().iter_mut().for_each(|entry| {
-            entry.metadata.op_idx = entry.op_head_idx;
+    pub fn reset_entry_op(&mut self) {
+        self.iter_mut().for_each(|entry| {
+            entry.op_idx = entry.op_head_idx;
         });
     }
 
@@ -1428,11 +1428,11 @@ impl PatchingCache {
         self
     }
 
-    /// Remove all mutation entries that have the passed LocationType.
-    pub fn remove_by_location_type(&mut self, loc_type: LocationType) -> &mut Self {
-        self.retain(|e| e.loc_type() != loc_type);
-        self
-    }
+    // /// Remove all mutation entries that have the passed LocationType.
+    // pub fn remove_by_location_type(&mut self, loc_type: LocationType) -> &mut Self {
+    //     self.retain(|e| e.loc_type() != loc_type);
+    //     self
+    // }
 
     /// Purge all expect `max` elements from the cache.
     pub fn limit(&mut self, max: usize) -> &mut Self {
@@ -1448,13 +1448,13 @@ impl PatchingCache {
         self
     }
 
-    /// Remove all mutation entries that are of type LocationType::Constant and therefore
-    /// are not associated to any live value we might mutate.
-    pub fn remove_const_type(&mut self) -> &mut Self {
-        log::trace!("Removing const type entries from patching cache");
-        self.remove_by_location_type(LocationType::Constant);
-        self
-    }
+    // /// Remove all mutation entries that are of type LocationType::Constant and therefore
+    // /// are not associated to any live value we might mutate.
+    // pub fn remove_const_type(&mut self) -> &mut Self {
+    //     log::trace!("Removing const type entries from patching cache");
+    //     self.remove_by_location_type(LocationType::Constant);
+    //     self
+    // }
 
     /// 优化版本：单次遍历，同时设置状态和判断删除
     pub fn release_nop(&mut self) -> usize {
@@ -1526,15 +1526,7 @@ mod test {
     }
 
     fn dummy_entry(id: u64) -> PatchingCacheEntry {
-        PatchingCacheEntry::new(
-            id.into(),
-            0,
-            llvm_stackmap::LocationType::Constant,
-            8,
-            crate::dwarf::DwarfReg::Rax,
-            0,
-            0,
-        )
+        PatchingCacheEntry::new(id.into())
     }
 
     #[test]

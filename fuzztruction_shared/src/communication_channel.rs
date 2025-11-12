@@ -3,7 +3,7 @@ use log::*;
 use posixmq::PosixMq;
 use std::{env, ffi::CString};
 
-use crate::messages::*;
+use crate::{constants::{ENV_MQ_RECV_SHM, ENV_MQ_SEND_SHM}, messages::*};
 use anyhow::{Context, Result};
 
 use thiserror::Error;
@@ -38,9 +38,9 @@ impl From<env::VarError> for CommunicationChannelError {
 }
 
 impl CommunicationChannel {
-    pub fn from_env(agent: &str) -> Result<CommunicationChannel, CommunicationChannelError> {
-        let recv_name = env::var(format!("FT_MQ_{agent}_RECV"))?;
-        let send_name = env::var(format!("FT_MQ_{agent}_SEND"))?;
+    pub fn open_from_env() -> Result<CommunicationChannel, CommunicationChannelError> {
+        let recv_name = env::var(ENV_MQ_RECV_SHM)?;
+        let send_name = env::var(ENV_MQ_SEND_SHM)?;
 
         let mq_send = PosixMq::open(&send_name);
         let mq_recv = PosixMq::open(&recv_name);

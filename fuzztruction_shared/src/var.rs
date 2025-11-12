@@ -83,9 +83,9 @@ pub enum VarType {
     Int { width: u16, typedef: Option<String> },
     #[display("f{width}")]
     Float { width: u16, typedef: Option<String> },
-    #[display("{pointee}*")]
+    #[display("{pointee:?}*")]
     Pointer {
-        pointee: Box<VarType>,
+        pointee: Option<Box<VarType>>,
         typedef: Option<String>,
     },
     #[display("[{element}; {size:?}]")]
@@ -121,10 +121,10 @@ pub enum VarType {
 impl VarType {
     pub fn dummy_ptr() -> Self {
         VarType::Pointer {
-            pointee: Box::new(VarType::Other {
+            pointee: Some(Box::new(VarType::Other {
                 name: "void".to_string(),
                 typedef: None,
-            }),
+            })),
             typedef: None,
         }
     }
@@ -222,10 +222,11 @@ impl VarType {
                 33..=64 => 8,
                 _ => 16,
             },
+            VarType::Pointer { pointee: None, .. } => 8,
             VarType::Pointer {
-                pointee: pointee_type,
+                pointee: Some(pointee),
                 ..
-            } => pointee_type.num_bytes(),
+            } => pointee.num_bytes(),
             VarType::Array { size, .. } => (size.unwrap_or(1) as u64 + 7) / 8,
             VarType::Other { .. } => 8,
             VarType::Struct { .. } => 8,
@@ -236,7 +237,11 @@ impl VarType {
 
     pub fn dereference(&self) -> Option<&VarType> {
         match self {
-            VarType::Pointer { pointee, .. } => Some(pointee),
+            VarType::Pointer { pointee: None, .. } => None,
+            VarType::Pointer {
+                pointee: Some(pointee),
+                ..
+            } => Some(pointee),
             VarType::Array { element, .. } => Some(element),
             _ => None,
         }
@@ -275,7 +280,8 @@ impl VarType {
                 VarType::Int { .. } => true,
                 VarType::Float { .. } => true,
                 VarType::Bitfield { .. } => self.num_bytes() <= 8,
-                VarType::Pointer { pointee, .. } => match pointee.as_ref() {
+                VarType::Pointer { pointee: None, .. } => true,
+                VarType::Pointer { pointee: Some(pointee), .. } => match pointee.as_ref() {
                     VarType::Int { .. } => true,
                     VarType::Float { .. } => true,
                     VarType::Bitfield { .. } => self.num_bytes() <= 8,
@@ -290,7 +296,14 @@ impl VarType {
                 _ => false,
             }
         } else {
-            false
+            match self {
+                VarType::Int { .. } | VarType::Float { .. } | VarType::Pointer { .. } => true,
+                _ => {
+                    log::error!("Wrong var type in LLVM IR: {:#?}", self);
+                    panic!("Wrong var type in LLVM IR: {:#?}", self);
+                    false
+                }
+            }
         }
     }
 
@@ -338,8 +351,12 @@ impl VarType {
                 };
                 Ok(format!("{}", val))
             }
+            VarType::Pointer { pointee: None, .. } => {
+                let address = u64::from_le_bytes(value[..8].try_into()?) as usize;
+                Ok(format!("0x{:x}", address))
+            }
             VarType::Pointer {
-                pointee: pointee_type,
+                pointee: Some(pointee_type),
                 ..
             } => {
                 let val = pointee_type

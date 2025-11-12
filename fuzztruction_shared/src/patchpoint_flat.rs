@@ -21,6 +21,7 @@
 //! ```
 
 use crate::constants::ENV_PP_SHM;
+use crate::dwarf::{self, DwarfReg};
 use crate::patchpoint::PatchPoint;
 use crate::types::PatchPointID;
 use crate::var::VarType;
@@ -84,14 +85,14 @@ pub enum VarTypeKind {
 pub struct VarTypeFlat {
     /// 是否可追踪（val_tracable）
     pub is_tracable: bool,
-    /// 是否是指针
+    /// Whether it is a register variable.
+    pub is_reg: bool,
+    /// If it is a variable in memory (not a register), whether it is a pointer.
     pub is_ptr: bool,
     /// dereference 后的类型种类
     pub deref_kind: VarTypeKind,
-    _padding_0: u8,
     /// dereference 后的字节长度
     pub deref_bytes: u16,
-    _padding_1: u8,
 }
 
 impl From<Option<&VarType>> for VarTypeFlat {
@@ -100,10 +101,9 @@ impl From<Option<&VarType>> for VarTypeFlat {
             return Self {
                 is_tracable: false,
                 is_ptr: false,
+                is_reg: false,
                 deref_kind: VarTypeKind::None,
-                _padding_0: 0,
                 deref_bytes: 0,
-                _padding_1: 0,
             };
         }
 
@@ -111,40 +111,64 @@ impl From<Option<&VarType>> for VarTypeFlat {
         let is_tracable = vt.val_tracable();
 
         // 提取 dereference 信息
-        let (deref_kind, deref_size, deref_ptr) = if let Some(deref) = vt.dereference() {
+        let (deref_kind, num_bytes, is_ptr, is_reg) = if let Some(deref) = vt.dereference() {
             match deref {
                 VarType::Int { .. }
                 | VarType::Float { .. }
                 | VarType::Struct { .. }
                 | VarType::Enum { .. }
                 | VarType::Union { .. }
-                | VarType::Bitfield { .. } => (VarTypeKind::Int, deref.num_bytes() as u16, false),
-                VarType::Array { .. } => (VarTypeKind::Array, deref.num_bytes() as u16, false),
-                VarType::Pointer { pointee, .. } => match pointee.as_ref() {
+                | VarType::Bitfield { .. } => {
+                    (VarTypeKind::Int, deref.num_bytes() as u16, false, false)
+                }
+                VarType::Array { .. } => {
+                    (VarTypeKind::Array, deref.num_bytes() as u16, false, false)
+                }
+                VarType::Pointer { pointee: None, .. } => {
+                    // 64 bytes for opaque pointer
+                    // Same as i64
+                    (VarTypeKind::Int, 8, false, false)
+                }
+                VarType::Pointer {
+                    pointee: Some(pointee),
+                    ..
+                } => match pointee.as_ref() {
                     VarType::Int { .. }
                     | VarType::Float { .. }
                     | VarType::Struct { .. }
                     | VarType::Enum { .. }
                     | VarType::Union { .. }
                     | VarType::Bitfield { .. } => {
-                        (VarTypeKind::Int, pointee.num_bytes() as u16, true)
+                        (VarTypeKind::Int, pointee.num_bytes() as u16, true, false)
                     }
-                    VarType::Array { .. } => (VarTypeKind::Array, pointee.num_bytes() as u16, true),
-                    _ => (VarTypeKind::None, 0, true),
+                    VarType::Array { .. } => {
+                        (VarTypeKind::Array, pointee.num_bytes() as u16, true, false)
+                    }
+                    _ => (VarTypeKind::None, 0, true, false),
                 },
-                _ => (VarTypeKind::None, 0, false),
+                _ => (VarTypeKind::None, 0, false, false),
             }
         } else {
-            (VarTypeKind::None, 0, false)
+            // deference() returns none, means that it is a register variable.
+            match vt {
+                VarType::Int { .. }
+                | VarType::Float { .. }
+                | VarType::Pointer { pointee: None, .. } => {
+                    (VarTypeKind::Int, vt.num_bytes() as u16, false, true)
+                }
+                _ => {
+                    log::error!("Wrong var type in LLVM IR register: {:#?}", vt);
+                    panic!("Wrong var type in LLVM IR register: {:#?}", vt);
+                }
+            }
         };
 
         Self {
             is_tracable,
-            is_ptr: deref_ptr,
+            is_ptr,
+            is_reg,
             deref_kind,
-            deref_bytes: deref_size,
-            _padding_0: 0,
-            _padding_1: 0,
+            deref_bytes: num_bytes,
         }
     }
 }
@@ -158,11 +182,20 @@ pub struct PatchPointFlat {
     pub ir_id: u32,       // 4 bytes（与 ir_id 相同）
     pub func_idx: u32,    // 4 bytes
 
+    // VMA
+    pub vma: u64, // 8 bytes
+
     // ===== 函数名信息（使用偏移量）=====
     /// 函数名在可变数据区的偏移量（相对于 vardata_offset）
     pub function_name_offset: u32, // 4 bytes
     /// 函数名长度（字节数）
     pub function_name_len: u16, // 2 bytes
+
+    // PatchPoint information
+    pub loc_type: llvm_stackmap::LocationType,
+    pub loc_size: u16,
+    pub dwarf_regnum: dwarf::DwarfReg,
+    pub offset_or_constant: i32,
 
     // ===== LiveOuts 信息（使用偏移量）=====
     /// LiveOuts 在可变数据区的偏移量（相对于 vardata_offset）
@@ -227,7 +260,7 @@ const _: () = {
     assert!(PP_SIZE % 8 == 0); // 8 字节对齐
 
     assert!(std::mem::size_of::<LiveOutFlat>() == 4);
-    assert!(std::mem::size_of::<VarTypeFlat>() == 8);
+    assert!(std::mem::size_of::<VarTypeFlat>() == 6);
     assert!(std::mem::size_of::<CacheHeader>() == 16);
 };
 
@@ -337,7 +370,7 @@ impl PatchPointCache {
     }
 
     /// 从环境变量打开
-    pub fn open_from_env() -> Result<Self> {
+    pub fn open_shm_from_env() -> Result<Self> {
         let shm_name = std::env::var(ENV_PP_SHM).context(format!("{ENV_PP_SHM} not set"))?;
         Self::open(&shm_name)
     }
@@ -386,6 +419,13 @@ impl PatchPointCache {
             count: self.count,
         }
     }
+
+    pub fn unlink(&self) {
+        let name = CString::new(self.shm_name.clone()).unwrap();
+        unsafe {
+            libc::shm_unlink(name.as_ptr());
+        }
+    }
 }
 
 impl Drop for PatchPointCache {
@@ -426,6 +466,10 @@ impl<'a> PatchPointRef<'a> {
         self.pp.function_name(self.vardata_base)
     }
 
+    pub fn vma(&self) -> u64 {
+        self.pp.vma
+    }
+
     /// 获取 LiveOuts
     pub fn live_outs(&self) -> &[LiveOutFlat] {
         self.pp.live_outs(self.vardata_base)
@@ -457,6 +501,22 @@ impl<'a> PatchPointRef<'a> {
     /// 获取底层的 PatchPointFlat
     pub fn as_flat(&self) -> &PatchPointFlat {
         self.pp
+    }
+
+    pub fn loc_type(&self) -> llvm_stackmap::LocationType {
+        self.pp.loc_type
+    }
+
+    pub fn loc_size(&self) -> u16 {
+        self.pp.loc_size
+    }
+
+    pub fn dwarf_regnum(&self) -> dwarf::DwarfReg {
+        self.pp.dwarf_regnum
+    }
+
+    pub fn offset_or_constant(&self) -> i32 {
+        self.pp.offset_or_constant
     }
 }
 
@@ -522,7 +582,7 @@ impl PatchPointCacheBuilder {
             "Time taken to build PatchPointCache: {:?}",
             end.duration_since(start)
         );
-        
+
         Ok(builder)
     }
 
@@ -561,12 +621,18 @@ impl PatchPointCacheBuilder {
         let var_type_flat = VarTypeFlat::from(pp.var_type());
 
         // 4. 创建 PatchPointFlat
+        let loc = pp.location().as_ref().unwrap();
         let pp_flat = PatchPointFlat {
             id: pp.id().clone(),
             ir_id: pp.llvm_id(),
             func_idx: pp.func_idx(),
+            vma: pp.vma(),
             function_name_offset,
             function_name_len,
+            loc_type: loc.loc_type,
+            loc_size: loc.loc_size,
+            dwarf_regnum: DwarfReg::try_from(loc.dwarf_regnum).unwrap(),
+            offset_or_constant: loc.offset_or_constant,
             liveout_offset,
             liveout_count,
             var_type: var_type_flat,

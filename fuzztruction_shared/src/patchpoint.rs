@@ -119,6 +119,13 @@ impl PatchPointIR {
         )
     }
 
+    // For Load and Store instructions, we patch the pointer of the variable.
+    // For example, the pointer operand of the Load and Store instructions.
+    // Thus the variable type infomation is embedded in a pointer, unconditionally.
+    pub fn is_var_ptr_patched(&self) -> bool {
+        self.ins == LLVMInstruction::Load || self.ins == LLVMInstruction::Store
+    }
+
     pub fn function_id(&self) -> FunctionId {
         (&self.function).into()
     }
