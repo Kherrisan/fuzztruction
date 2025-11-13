@@ -1,8 +1,7 @@
-
 use libc;
-use std;
 use std::fs::File;
 use std::io::Read;
+use std::{self, fmt::Display};
 
 pub type Pid = libc::pid_t;
 use serde::{Deserialize, Serialize};
@@ -19,6 +18,19 @@ pub struct MapRange {
     pub flags: String,
     pub inode: usize,
     pub pathname: Option<String>,
+}
+
+impl Display for MapRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:x} - {:x} {} {}",
+            self.range_start,
+            self.range_end,
+            self.flags,
+            self.pathname.as_ref().unwrap_or(&"".to_string())
+        )
+    }
 }
 
 impl MapRange {

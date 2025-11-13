@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use derive_more::Display;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::ptr;
+use std::{env, ptr};
 use std::time::Instant;
 
 /// 共享内存头部
@@ -421,9 +421,13 @@ impl PatchPointCache {
     }
 
     pub fn unlink(&self) {
-        let name = CString::new(self.shm_name.clone()).unwrap();
-        unsafe {
-            libc::shm_unlink(name.as_ptr());
+        if env::var("PINGU_GDB").is_ok() {
+            log::info!("PINGU_GDB is set, skipping unlinking of patchpint cache");
+        } else {
+            let name = CString::new(self.shm_name.clone()).unwrap();
+            unsafe {
+                libc::shm_unlink(name.as_ptr());
+            }
         }
     }
 }

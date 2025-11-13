@@ -6,11 +6,9 @@ use std::{
     fmt::Debug,
     mem::{self},
     slice,
-    time::Instant,
 };
 
 use anyhow::Result;
-use llvm_stackmap::LocationType;
 use log::*;
 
 use anyhow::anyhow;
@@ -113,19 +111,19 @@ pub mod backing_memory {
         }
     }
 
-    impl Drop for Memory {
-        fn drop(&mut self) {
-            if let Some(s) = self.shm_memory() {
-                if env::var("PINGU_GDB").is_ok() {
-                    log::info!("PINGU_GDB is set, skipping unlinking of patching cache");
-                } else {
-                    unsafe {
-                        libc::shm_unlink(s.shm_path.as_ptr());
-                    }
-                }
-            }
-        }
-    }
+    // impl Drop for Memory {
+    //     fn drop(&mut self) {
+    //         if let Some(s) = self.shm_memory() {
+    //             if env::var("PINGU_GDB").is_ok() {
+    //                 println!("PINGU_GDB is set, skipping unlinking of patching cache");
+    //             } else {
+    //                 unsafe {
+    //                     libc::munmap(s.shm_path.as_ptr() as *mut _, s.size);
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 #[derive(Debug)]
@@ -196,7 +194,7 @@ impl Clone for PatchingCache {
         };
 
         // ✅ 重建 HashMap
-        new_cache.rebuild_id_to_idx_map();
+        new_cache.rebuild_pp_index();
 
         new_cache
     }
@@ -361,6 +359,18 @@ impl<'a> Iterator for PatchingCacheIterMut<'a> {
 impl<'a> ExactSizeIterator for PatchingCacheIterMut<'a> {
     fn len(&self) -> usize {
         self.index_iter.len()
+    }
+}
+
+impl Drop for PatchingCache {
+    fn drop(&mut self) {
+        if env::var("PINGU_GDB").is_ok() {
+            println!("PINGU_GDB is set, skipping unlinking of patching cache");
+        } else {
+            unsafe {
+                libc::munmap(self.content.0 as *mut _, self.content_size);
+            }
+        }
     }
 }
 
@@ -535,7 +545,7 @@ impl PatchingCache {
 
             // ✅ 如果不是 create 模式，说明是从已有的 shm 加载，需要重建 HashMap
             if !create {
-                cache.rebuild_id_to_idx_map();
+                cache.rebuild_pp_index();
             }
 
             return Ok(cache);
@@ -564,10 +574,14 @@ impl PatchingCache {
     }
 
     pub fn unlink(&self) {
-        if let Some(name) = self.shm_name() {
-            let name = CString::new(name).unwrap();
-            unsafe {
-                libc::shm_unlink(name.as_ptr());
+        if env::var("PINGU_GDB").is_ok() {
+            println!("PINGU_GDB is set, skipping unlinking of patching cache");
+        } else {
+            if let Some(name) = self.shm_name() {
+                let name = CString::new(name).unwrap();
+                unsafe {
+                    libc::shm_unlink(name.as_ptr());
+                }
             }
         }
     }
@@ -684,7 +698,7 @@ impl PatchingCache {
     }
 
     /// 重建 id -> idx 映射（在 clone/load/consolidate 时调用）
-    fn rebuild_id_to_idx_map(&mut self) {
+    pub fn rebuild_pp_index(&mut self) {
         self.id_to_idx.clear();
         for idx in self.content().iter() {
             let entry = self.content().entry_ref(idx);
@@ -695,7 +709,7 @@ impl PatchingCache {
     /// ✅ 检查是否发生了 consolidate，如果是则重建 HashMap
     fn rebuild_if_invalidated(&mut self) {
         if self.content().is_invalidated() {
-            self.rebuild_id_to_idx_map();
+            self.rebuild_pp_index();
             self.content_mut().clear_invalidated();
         }
     }
