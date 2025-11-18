@@ -255,20 +255,24 @@ impl Message for HelloMessage {
 pub struct RunMessage {
     header: MsgHeader,
     pub timeout_ms: u32,
+    pub execution_id: u32,
 }
 impl Default for RunMessage {
     fn default() -> Self {
         RunMessage {
             header: MsgHeader::new(MessageType::MsgIdRun),
             timeout_ms: 1000,
+            execution_id: 0,
         }
     }
 }
 impl RunMessage {
-    pub fn from_millis(timeout_ms: u32) -> RunMessage {
-        let mut msg = RunMessage::default();
-        msg.timeout_ms = timeout_ms;
-        msg
+    pub fn new(timeout_ms: u32, execution_id: u32) -> Self {
+        RunMessage {
+            header: MsgHeader::new(MessageType::MsgIdRun),
+            timeout_ms,
+            execution_id,
+        }
     }
 }
 impl Message for RunMessage {
@@ -379,25 +383,25 @@ impl Message for TracePointStat {
 
 #[derive(Debug, Clone)]
 #[repr(C)]
-pub struct SyncMutations {
+pub struct SyncPatchings {
     header: MsgHeader,
 }
-impl SyncMutations {
+impl SyncPatchings {
     pub fn new() -> Self {
-        SyncMutations {
+        SyncPatchings {
             ..Default::default()
         }
     }
 }
 
-impl Default for SyncMutations {
+impl Default for SyncPatchings {
     fn default() -> Self {
-        SyncMutations {
+        SyncPatchings {
             header: MsgHeader::new(MessageType::MsgIdSyncMutations),
         }
     }
 }
-impl Message for SyncMutations {
+impl Message for SyncPatchings {
     fn message_type() -> MessageType {
         MessageType::MsgIdSyncMutations
     }
@@ -504,7 +508,7 @@ pub enum ReceivableMessages {
     TerminatedMessage(TerminatedMessage),
     ShutdownMessage(ShutdownMessage),
     TracePointStat(TracePointStat),
-    SyncMutations(SyncMutations),
+    SyncPatchings(SyncPatchings),
     Ok(Ok),
     ChildPid(ChildPid),
 }

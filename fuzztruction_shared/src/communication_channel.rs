@@ -139,8 +139,8 @@ impl CommunicationChannel {
                 ))
             }
             MessageType::MsgIdSyncMutations => {
-                return Ok(ReceivableMessages::SyncMutations(
-                    SyncMutations::try_from_bytes(&buffer)?,
+                return Ok(ReceivableMessages::SyncPatchings(
+                    SyncPatchings::try_from_bytes(&buffer)?,
                 ))
             }
             _ => {

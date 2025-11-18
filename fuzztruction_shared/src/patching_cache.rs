@@ -669,14 +669,14 @@ impl PatchingCache {
 /// Methods that are working on the actual cache content.
 impl PatchingCache {
     pub fn print(&self) {
-        self.entries().iter().for_each(|e| {
+        self.iter().for_each(|e| {
             println!("{:#?}", e);
         });
     }
 
-    pub fn print_dirty_flags(&self) {
-        self.entries().iter().for_each(|e| {
-            println!("{}: {}", e.id().0, flags_to_str(e.dirty_flags()));
+    pub fn log_dirty_flags(&self) {
+        self.iter().for_each(|e| {
+            log::trace!("{}: {}", e.id().0, flags_to_str(e.dirty_flags()));
         });
     }
 
@@ -699,11 +699,14 @@ impl PatchingCache {
 
     /// 重建 id -> idx 映射（在 clone/load/consolidate 时调用）
     pub fn rebuild_pp_index(&mut self) {
+        let start = std::time::Instant::now();
         self.id_to_idx.clear();
         for idx in self.content().iter() {
             let entry = self.content().entry_ref(idx);
             self.id_to_idx.insert(entry.id(), idx);
         }
+        let end = std::time::Instant::now();
+        println!("rebuild_pp_index time: {:?}", end.duration_since(start));
     }
 
     /// ✅ 检查是否发生了 consolidate，如果是则重建 HashMap

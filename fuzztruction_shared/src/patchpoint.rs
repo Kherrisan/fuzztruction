@@ -394,10 +394,6 @@ impl PatchPoint {
                     );
                 }
 
-                if record.patch_point_id == 134260 {
-                    println!("adfad");
-                }
-
                 if let Ok(pp) = PatchPoint::new(
                     base,
                     vma,
