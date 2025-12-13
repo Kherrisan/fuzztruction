@@ -68,7 +68,7 @@ pub enum PatchingCacheError {
 }
 
 pub mod backing_memory {
-    use std::{env, ffi::CString};
+    use std::ffi::CString;
 
     use crate::patching_cache_content::PatchingCacheContent;
 

@@ -11,7 +11,7 @@ use std::{
     mem::size_of,
 };
 
-use crate::constants::ENV_FT_SET_SHM;
+use crate::{constants::ENV_FT_SET_SHM, types::PatchPointID};
 
 use super::shared_memory::MmapShMem;
 
@@ -94,27 +94,9 @@ impl TraceVector {
         Ok(())
     }
 
-    pub fn frequent_set(&self, threshold: usize) -> Vec<u32> {
-        let mut trace_cnt = self.hit_counts();
-        trace_cnt.retain(|_, cnt| *cnt as usize > threshold);
-        trace_cnt.keys().cloned().collect::<Vec<_>>()
-    }
-
     pub fn memory_ratio(&self) -> f64 {
         (self.len() * size_of::<TraceVectorEntry>() + size_of::<TraceVectorHeader>()) as f64
             / self.memory_capacity() as f64
-    }
-
-    pub fn hit_set(&self) -> HashSet<u32> {
-        self.entries_slice().iter().map(|e| e.id).collect()
-    }
-
-    pub fn hit_counts(&self) -> HashMap<u32, u32> {
-        let mut counts = HashMap::new();
-        for entry in self.entries_slice() {
-            *counts.entry(entry.id).or_insert(0) += 1;
-        }
-        counts
     }
 
     pub fn memory_capacity(&self) -> usize {
@@ -281,17 +263,13 @@ impl TraceVector {
         self.header_mut().offset = 0;
     }
 
-    pub fn items(&self) -> Vec<TraceItem> {
-        self.iter()
+    pub fn items(&self, blacklist: &HashSet<PatchPointID>) -> Vec<TraceItem> {
+        self.iter(blacklist)
             .map(|e| TraceItem {
                 id: e.id,
                 value: e.value().to_vec(),
             })
             .collect()
-    }
-
-    pub fn entries_slice(&self) -> Vec<&TraceVectorEntry> {
-        self.iter().collect()
     }
 
     pub fn len_mut(&mut self) -> &mut usize {
@@ -313,63 +291,66 @@ impl TraceVector {
         }
     }
 
-    pub fn iter(&self) -> TraceVectorIterator {
+    pub fn iter<'b>(&self, blacklist: &'b HashSet<PatchPointID>) -> TraceVectorIterator<'_, 'b> {
         TraceVectorIterator {
             trace_vector: self,
             current_idx: 0,
             current_offset: 0,
+            blacklist,
         }
     }
 }
 
-pub struct TraceVectorIterator<'a> {
+pub struct TraceVectorIterator<'a, 'b> {
     trace_vector: &'a TraceVector,
+
+    blacklist: &'b HashSet<PatchPointID>,
+
     current_idx: usize,
+
     current_offset: usize,
+
 }
 
-impl<'a> Iterator for TraceVectorIterator<'a> {
+impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
     type Item = &'a TraceVectorEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_idx >= self.trace_vector.len() {
-            return None;
+        loop {
+            if self.current_idx >= self.trace_vector.len() {
+                return None;
+            }
+
+            let align = std::mem::align_of::<TraceVectorEntry>();
+
+            // 计算对齐偏移
+            let base_ptr = unsafe { self.trace_vector.data_ptr().add(self.current_offset) };
+            let alignment_offset = base_ptr.align_offset(align) as usize;
+
+            if alignment_offset == usize::MAX {
+                panic!("Cannot align pointer in iterator");
+            }
+
+            // 应用对齐偏移
+            self.current_offset += alignment_offset;
+
+            let entry = unsafe {
+                let ptr =
+                    self.trace_vector.data_ptr().add(self.current_offset) as *const TraceVectorEntry;
+                &*ptr
+            };
+
+            // 更新索引和偏移量，为下一次迭代做准备
+            self.current_idx += 1;
+            self.current_offset += size_of::<TraceVectorEntry>() + entry.length as usize;
+
+            // 如果 entry.id 在黑名单中，跳过并继续循环
+            if self.blacklist.contains(&PatchPointID(entry.id)) {
+                continue;
+            }
+
+            return Some(entry);
         }
-
-        let align = std::mem::align_of::<TraceVectorEntry>();
-
-        // 计算对齐偏移
-        let base_ptr = unsafe { self.trace_vector.data_ptr().add(self.current_offset) };
-        let alignment_offset = base_ptr.align_offset(align) as usize;
-
-        if alignment_offset == usize::MAX {
-            panic!("Cannot align pointer in iterator");
-        }
-
-        // 应用对齐偏移
-        self.current_offset += alignment_offset;
-
-        let entry = unsafe {
-            let ptr =
-                self.trace_vector.data_ptr().add(self.current_offset) as *const TraceVectorEntry;
-            &*ptr
-        };
-
-        // 更新索引和偏移量，为下一次迭代做准备
-        self.current_idx += 1;
-        self.current_offset += size_of::<TraceVectorEntry>() + entry.length as usize;
-
-        Some(entry)
-    }
-}
-
-// 为了方便使用，实现 IntoIterator trait
-impl<'a> IntoIterator for &'a TraceVector {
-    type Item = &'a TraceVectorEntry;
-    type IntoIter = TraceVectorIterator<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
     }
 }
 

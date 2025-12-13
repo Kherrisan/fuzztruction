@@ -8,7 +8,7 @@ use std::{
     io::{self, Read as _},
     os::unix,
     path::{Path, PathBuf},
-    process::{self, Command},
+    process::{self},
 };
 use tempfile;
 use thiserror::Error;

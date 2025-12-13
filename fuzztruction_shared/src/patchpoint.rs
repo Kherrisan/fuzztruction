@@ -9,7 +9,6 @@ use crate::{
     constants::PATCH_POINT_SIZE,
     func::FunctionId,
     types::PatchPointID,
-    util::{dump_bin, load_bin},
     var::{VarDeclRef, VarType},
 };
 use llvm_stackmap::{LLVMInstruction, LiveOut, Location, LocationType, StackMap};
@@ -65,7 +64,7 @@ impl<'de> Deserialize<'de> for InstrumentMethod {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StateVarType {
     #[serde(rename = "arg")]
     Arg,
@@ -103,12 +102,15 @@ pub struct PatchPointIR {
     pub pp_type: PatchpointType,
     pub var: Option<VarDeclRef>,
     pub method: InstrumentMethod,
-    #[serde(skip)]
     pub detail: String,
     pub bb_name: String,
 }
 
 impl PatchPointIR {
+    pub fn is_offset_variable(&self) -> bool {
+        self.detail.contains("offset")
+    }
+
     pub fn var_with_loc(&self) -> String {
         format!(
             "{}({}:{}:{})",
@@ -138,11 +140,21 @@ impl PatchPointIR {
         self.pp_type == PatchpointType::RET
     }
 
+    pub fn is_cmp(&self) -> bool {
+        self.ins == LLVMInstruction::ICmp
+            || (self.ins == LLVMInstruction::Call && self.detail.contains("memcmp"))
+    }
+
     pub fn display_graph_node(&self, escape: bool) -> String {
         if let Some(var) = self.var.as_ref() {
+            let name = if self.is_cmp() {
+                "@icmp".to_string()
+            } else {
+                var.as_string()
+            };
             format!(
                 "{}(#{}){} {}:{}:{}",
-                var.as_string(),
+                name,
                 self.id,
                 if escape { "\\n" } else { "\n" },
                 self.file,
@@ -158,9 +170,21 @@ impl PatchPointIR {
 impl Display for PatchPointIR {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(var) = self.var.as_ref() {
-            write!(f, "{}(#{})", var.as_string(), self.id)
+            write!(
+                f,
+                "{}(ir#{},{}:{}:{})",
+                var.as_string(),
+                self.id,
+                self.file,
+                self.line,
+                self.col
+            )
         } else {
-            write!(f, "#{}", self.id)
+            write!(
+                f,
+                "#{},{}:{}:{}",
+                self.id, self.file, self.line, self.col
+            )
         }
     }
 }
@@ -253,6 +277,12 @@ impl PatchPoint {
             ir.line,
             ir.col
         )
+    }
+
+    pub fn is_cmp(&self) -> bool {
+        self.ir.as_ref().unwrap().ins == LLVMInstruction::ICmp
+            || (self.ir.as_ref().unwrap().ins == LLVMInstruction::Call
+                && self.ir.as_ref().unwrap().detail.contains("memcmp"))
     }
 
     pub fn var(&self) -> Option<&VarDeclRef> {

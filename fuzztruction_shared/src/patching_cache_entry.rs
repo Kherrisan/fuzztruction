@@ -1,11 +1,8 @@
-use llvm_stackmap::LocationType;
-use memoffset::offset_of;
 use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumString;
 
 use crate::{
-    dwarf::{self, DwarfReg},
     patching_cache::{PATCHING_CACHE_ENTRY_FLAGS, PatchingCacheEntryFlags},
     patchpoint::PatchPoint,
     types::PatchPointID,

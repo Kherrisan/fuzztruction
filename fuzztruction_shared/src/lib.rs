@@ -36,3 +36,4 @@ pub mod func_addr;
 pub mod func_block_addr;
 pub mod patchpoint_flat;
 pub mod var;
+pub mod bounded_set;
