@@ -3,12 +3,12 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     ffi::CString,
-    fmt::Debug,
+    fmt::{Debug, Display},
     mem::{self},
     slice,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::*;
 
 use anyhow::anyhow;
@@ -140,6 +140,35 @@ pub struct PatchingCache {
     id_to_idx: HashMap<PatchPointID, usize>,
 }
 
+impl Display for PatchingCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dirty_cnt = 0;
+        let mut clear_cnt = 0;
+        let mut enable_cnt = 0;
+        for entry in self.entries() {
+            if entry.is_any(PatchingCacheEntryDirty::Dirty) {
+                dirty_cnt += 1;
+            }
+            if entry.is_any(PatchingCacheEntryDirty::Clear) {
+                clear_cnt += 1;
+            }
+            if entry.is_any(PatchingCacheEntryDirty::Enable) {
+                enable_cnt += 1;
+            }
+        }
+        write!(
+            f,
+            "PatchingCache {{ total_size: {}, used_len: {}, dirty_cnt: {}, enable_cnt: {}, clear_cnt: {} }}",
+            self.total_size(),
+            self.len(),
+            dirty_cnt,
+            enable_cnt,
+            clear_cnt
+        )?;
+        Ok(())
+    }
+}
+
 impl Debug for PatchingCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dirty_cnt = 0;
@@ -157,12 +186,23 @@ impl Debug for PatchingCache {
             }
         }
         write!(f, "PatchingCache {{\n")?;
-        write!(f, "    total_size: {},\n", self.total_size())?;
-        write!(f, "    used_len: {},\n", self.len())?;
-        write!(f, "    dirty_cnt: {},\n", dirty_cnt)?;
-        write!(f, "    enable_cnt: {},\n", enable_cnt)?;
-        write!(f, "    clear_cnt: {},\n", clear_cnt)?;
-        write!(f, "}}")
+        write!(f, "\ttotal_size: {},\n", self.total_size())?;
+        write!(f, "\tused_len: {},\n", self.len())?;
+        write!(f, "\tdirty_cnt: {},\n", dirty_cnt)?;
+        write!(f, "\tenable_cnt: {},\n", enable_cnt)?;
+        write!(f, "\tclear_cnt: {},\n", clear_cnt)?;
+        write!(f, "\tcontent:\n")?;
+        self.content().iter().take(10).for_each(|entry_idx| {
+            let entry = self.content().entry_ref(entry_idx);
+            write!(f, "\t{:#?}\n", entry).unwrap();
+            self.content().ops(entry_idx).iter().for_each(|op| {
+                write!(f, "\t\t{:#?}]\n", op).unwrap();
+            });
+        });
+        if self.len() > 10 {
+            write!(f, "\t......\n")?;
+        }
+        write!(f, "}}\n")
     }
 }
 
@@ -367,8 +407,11 @@ impl Drop for PatchingCache {
         if env::var("PINGU_GDB").is_ok() {
             println!("PINGU_GDB is set, skipping unlinking of patching cache");
         } else {
-            unsafe {
-                libc::munmap(self.content.0 as *mut _, self.content_size);
+            match &self.backing_memory {
+                backing_memory::Memory::ShmMemory(..) => unsafe {
+                    libc::munmap(self.content.0 as *mut _, self.content_size);
+                },
+                backing_memory::Memory::HeapMemory(..) => {}
             }
         }
     }
@@ -675,9 +718,15 @@ impl PatchingCache {
     }
 
     pub fn log_dirty_flags(&self) {
-        self.iter().for_each(|e| {
-            log::trace!("{}: {}", e.id().0, flags_to_str(e.dirty_flags()));
-        });
+        if self.len() < 100 {
+            self.iter().for_each(|e| {
+                log::trace!("{}: {}", e.id().0, flags_to_str(e.dirty_flags()));
+            });
+        }
+    }
+
+    pub fn get_idx(&self, pp: PatchPointID) -> Option<usize> {
+        self.id_to_idx.get(&pp).cloned()
     }
 
     /// ✅ O(1) 查找：使用 HashMap 加速
@@ -706,12 +755,13 @@ impl PatchingCache {
             self.id_to_idx.insert(entry.id(), idx);
         }
         let end = std::time::Instant::now();
-        println!("rebuild_pp_index time: {:?}", end.duration_since(start));
+        log::debug!("rebuild_pp_index time: {:?}", end.duration_since(start));
     }
 
     /// ✅ 检查是否发生了 consolidate，如果是则重建 HashMap
-    fn rebuild_if_invalidated(&mut self) {
+    pub fn rebuild_if_invalidated(&mut self) {
         if self.content().is_invalidated() {
+            log::debug!("PatchingCache content is invalidated, rebuilding index");
             self.rebuild_pp_index();
             self.content_mut().clear_invalidated();
         }
@@ -721,7 +771,9 @@ impl PatchingCache {
         let id = entry.id(); // ✅ 保存 id 用于 HashMap
         let result = self.content_mut().push(entry).and_then(|idx| {
             if ops.len() > 0 {
-                self.content_mut().push_op_batch(idx, &ops)?;
+                self.content_mut()
+                    .push_op_batch(idx, &ops)
+                    .context("Failed to push op batch")?;
             }
             // ✅ 维护 HashMap
             self.id_to_idx.insert(id, idx);
@@ -1159,6 +1211,11 @@ impl PatchingCache {
      * the entries in the other (new) cache will be kept.
      */
     pub fn union(&mut self, other: &PatchingCache) -> Result<()> {
+        // if other.len() < 100 {
+        //     other
+        //         .iter()
+        //         .for_each(|e| log::trace!("Other patching cache entry: {:#?}", e));
+        // }
         // 使用优化的单次遍历版本
         self.union_single_pass(other)
     }
@@ -1215,7 +1272,7 @@ impl PatchingCache {
                     ));
                 }
 
-                // 收集需要处理patching操作的信息
+                // 收集需要处理 patching ops 的信息
                 for &flag in &FLAGS {
                     if other_entry.is_dirty(flag) {
                         patching_operations_to_handle.push((self_idx, other_idx, flag));
@@ -1236,30 +1293,20 @@ impl PatchingCache {
             }
         }
 
-        // 批量处理patching操作
+        // 批量处理 patching ops
         for (self_idx, other_idx, flag) in patching_operations_to_handle {
-            self.handle_union_patching_operations(self_idx, other_idx, other, flag)?;
+            self.handle_union_patching_operations(self_idx, other_idx, other, flag)
+                .context("Failed to handle union patching operations")?;
         }
 
         // 批量添加收集的条目
         for (entry, ops) in entries_to_add {
-            self.push(entry, ops)?;
+            self.push(entry, ops).context("Failed to push entry")?;
         }
 
         if any_dirty {
             self.dirty = true;
         }
-
-        Ok(())
-    }
-
-    /// 传统四次遍历版本（保留用于对比测试）
-    #[allow(dead_code)]
-    fn union_four_pass(&mut self, other: &PatchingCache) -> Result<()> {
-        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::Tracing)?;
-        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::TracingVal)?;
-        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::Patching)?;
-        self.union_with_dirty_flag(other, PatchingCacheEntryFlags::Jumping)?;
 
         Ok(())
     }
@@ -1361,63 +1408,16 @@ impl PatchingCache {
                     // patching operations are executed dynamically,
                     // inside the `patching_xxx` stub,
                     // so the code does not need to be re-compiled.
-                    self.content_mut().clear_entry_ops(self_idx)?;
-                    self.content_mut().push_op_batch(self_idx, &other_ops)?;
+                    self.content_mut()
+                        .clear_entry_ops(self_idx)
+                        .context("Failed to clear entry ops")?;
+                    self.content_mut()
+                        .push_op_batch(self_idx, &other_ops)
+                        .context("Failed to push op batch")?;
                 }
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    fn union_with_dirty_flag(
-        &mut self,
-        other: &PatchingCache,
-        flag: PatchingCacheEntryFlags,
-    ) -> Result<()> {
-        log::trace!("Unioning with flag: {:?}", flag);
-        for other_idx in other.content().iter() {
-            let other_entry = other.content().entry_ref(other_idx);
-
-            if !other_entry.is_dirty(flag) {
-                continue;
-            }
-
-            let pp_id = other_entry.id();
-
-            let set_dirty = if let Some((idx, _)) = self.content().find_entry(pp_id) {
-                let entry = self.content().entry_mut(idx);
-                let set_dirty =
-                    Self::process_union_intersected_entry_flag(entry, other_entry, flag);
-
-                // 检查冲突：patching和jumping不能同时设置
-                if entry.is_dirty(PatchingCacheEntryFlags::Patching)
-                    && entry.is_dirty(PatchingCacheEntryFlags::Jumping)
-                {
-                    return Err(anyhow!(
-                        "Patching and jumping are both set for entry (PatchPointID)#{}",
-                        pp_id.0
-                    ));
-                }
-
-                // 处理patching操作
-                self.handle_union_patching_operations(idx, other_idx, other, flag)?;
-
-                set_dirty
-            } else {
-                let ops = other.content().ops(other_idx);
-                let mut other_entry = other_entry.clone();
-                other_entry.set_dirty(flag);
-                self.push(other_entry, ops)?;
-
-                true
-            };
-
-            if set_dirty {
-                self.dirty = true;
-            }
-        }
-
         Ok(())
     }
 
@@ -1478,7 +1478,7 @@ impl PatchingCache {
         log::trace!("Releasing nop and clear entries from patching cache");
 
         // ✅ 单次遍历：同时设置 Clear->Nop 和判断是否删除
-        let removed_count = self.content_mut().retain(|e| {
+        let removed_count = self.retain(|e| {
             // 先设置 Clear -> Nop
             e.set_by(PatchingCacheEntryDirty::Clear, PatchingCacheEntryDirty::Nop);
 
@@ -1501,7 +1501,8 @@ impl PatchingCache {
     }
 
     pub fn first(&self) -> &PatchingCacheEntry {
-        self.content().entry_ref(0)
+        let first_idx = self.content().iter().next().unwrap();
+        self.content().entry_ref(first_idx)
     }
 }
 

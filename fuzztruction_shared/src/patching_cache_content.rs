@@ -13,7 +13,6 @@ const PENDING_DELETIONS_LIMIT: usize = 500;
 #[derive(Debug, Clone, Copy)]
 struct EntryDescriptor {
     start_offset: usize,
-    op_head_idx: Option<usize>,
 }
 
 /// Operation 描述符：记录 operation 在数据区的位置
@@ -46,8 +45,11 @@ pub struct PatchingCacheContent {
     op_data_offset: usize,
 
     /// 是否需要使所有指针失效
-    invalidate: bool,
+    fuzzer_invalidate: bool,
+    agent_invalidate: bool,
 
+    /// TODO: 可以优化数据结构
+    /// 当 PatchingCache 存放极少量的表项时，以下两个固定大小的数组，可能会对 alloc、memset 等操作的时间开销产生较达影响
     /// Entry 描述符表（固定大小，快速索引）
     entry_descriptor_tbl: [Option<EntryDescriptor>; MAX_PATCHING_CACHE_ENTRIES],
 
@@ -110,7 +112,8 @@ impl PatchingCacheContent {
             self.op_valid_count = 0;
 
             self.total_size = size;
-            self.invalidate = false;
+            self.fuzzer_invalidate = false;
+            self.agent_invalidate = false;
 
             self.entry_descriptor_tbl.fill(None);
             self.op_descriptor_tbl.fill(None);
@@ -170,15 +173,24 @@ impl PatchingCacheContent {
         self.entry_descriptor_tbl.fill(None);
         self.op_descriptor_tbl.fill(None);
 
-        self.invalidate = true;
+        self.fuzzer_invalidate = true;
+        self.agent_invalidate = true;
     }
 
     pub fn is_invalidated(&self) -> bool {
-        self.invalidate
+        if std::env::var("PINGU_FUZZER").is_ok() {
+            self.fuzzer_invalidate
+        } else {
+            self.agent_invalidate
+        }
     }
 
     pub fn clear_invalidated(&mut self) {
-        self.invalidate = false;
+        if std::env::var("PINGU_FUZZER").is_ok() {
+            self.fuzzer_invalidate = false;
+        } else {
+            self.agent_invalidate = false;
+        }
     }
 
     /// 获取 entry 数据区起始指针
@@ -323,7 +335,6 @@ impl PatchingCacheContent {
         let descriptor_idx = self.entry_next_free_slot;
         let descriptor = Some(EntryDescriptor {
             start_offset: self.entry_current_data_size,
-            op_head_idx: None,
         });
 
         // 填充描述符表
@@ -338,6 +349,11 @@ impl PatchingCacheContent {
             log::error!("entry_descriptor_tbl[{}] is not None", descriptor_idx);
             anyhow::bail!("Descriptor slot not available");
         }
+
+        let mut entry = entry;
+        entry.op_head_idx = None;
+        entry.op_tail_idx = None;
+        entry.op_idx = None;
 
         // 拷贝 entry 数据到数据区
         unsafe {
@@ -362,7 +378,7 @@ impl PatchingCacheContent {
 
     /// 为指定 entry 添加一个 operation
     pub fn push_op(&mut self, entry_idx: usize, mut op: PatchingOperation) -> anyhow::Result<()> {
-        let mut entry_desc = self.entry_descriptor_tbl[entry_idx]
+        let _ = self.entry_descriptor_tbl[entry_idx]
             .ok_or_else(|| anyhow::anyhow!("Entry not found"))?;
 
         if self.op_next_free_slot >= MAX_PATCHING_OPERATIONS {
@@ -396,27 +412,60 @@ impl PatchingCacheContent {
 
         self.op_current_data_size += op_size;
 
-        // 链接到 entry 的操作链表
-        if entry_desc.op_head_idx.is_none() {
-            // 第一个操作
-            entry_desc.op_head_idx = Some(op_idx);
-            self.entry_descriptor_tbl[entry_idx] = Some(entry_desc);
+        let entry = self.entry_mut(entry_idx);
+
+        // 链接到 entry 的 ops 链表
+        if entry.op_head_idx.is_none() {
+            // 第一个 op
+            entry.op_head_idx = Some(op_idx);
+            entry.op_tail_idx = Some(op_idx);
         } else {
-            // 追加到链表末尾，找到最后一个 operation
-            let mut current_idx = entry_desc.op_head_idx.unwrap();
-            loop {
-                // ✅ 通过读取 PatchingOperation 数据中的 next_idx 来遍历链表
-                let current_op = self.op_ref(current_idx);
-                if current_op.next_idx.is_none() {
-                    // ✅ 只需更新实际 PatchingOperation 数据中的 next_idx（供 stub 读取）
-                    let prev_op = self.op_mut(current_idx);
-                    prev_op.next_idx = Some(op_idx);
-                    break;
-                }
-                current_idx = current_op.next_idx.unwrap();
+            // 追加到链表末尾
+            let last_op_idx = entry.op_tail_idx.unwrap();
+            
+            // ✅ 安全检查：防止自环
+            if last_op_idx == op_idx {
+                anyhow::bail!(
+                    "Operation self-reference detected: entry_idx={}, op_idx={}, last_op_idx={}. \
+                    This likely indicates that entry.op_tail_idx was not properly cleared.",
+                    entry_idx, op_idx, last_op_idx
+                );
             }
+            
+            // ✅ 验证 descriptor 存在
+            if self.op_descriptor_tbl[last_op_idx].is_none() {
+                anyhow::bail!(
+                    "Invalid op_tail_idx: entry_idx={}, op_tail_idx={} points to deleted descriptor. \
+                    This likely indicates that entry.op_tail_idx was not properly cleared after operation deletion.",
+                    entry_idx, last_op_idx
+                );
+            }
+            
+            let last_op = self.op_mut(last_op_idx);
+            last_op.next_idx = Some(op_idx);
+            entry.op_tail_idx = Some(op_idx);
         }
 
+        Ok(())
+    }
+
+    pub fn replace_op_batch(
+        &mut self,
+        entry_idx: usize,
+        ops: &[PatchingOperation],
+    ) -> anyhow::Result<()> {
+        // ✅ 保存 entry ID，以防 clear_entry_ops 触发 consolidate 导致索引失效
+        let entry_id = self.entry_ref(entry_idx).id();
+        
+        self.clear_entry_ops(entry_idx)?;
+        
+        // ✅ 重新查找 entry 索引（可能因 consolidate 而改变）
+        let new_entry_idx = self
+            .find_entry(entry_id)
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| anyhow::anyhow!("Entry not found after clear_entry_ops"))?;
+        
+        self.push_op_batch(new_entry_idx, ops)?;
         Ok(())
     }
 
@@ -434,13 +483,19 @@ impl PatchingCacheContent {
 
     /// 清除 entry 的所有 operations
     pub fn clear_entry_ops(&mut self, entry_idx: usize) -> anyhow::Result<()> {
-        let mut entry_desc = self.entry_descriptor_tbl[entry_idx]
+        let _ = self.entry_descriptor_tbl[entry_idx]
             .ok_or_else(|| anyhow::anyhow!("Entry not found"))?;
+        
+        // ✅ 先读取 op_head_idx 并立即清除 entry 的指针
+        // 这样即使 remove_op_chain 触发 consolidate，也不会有悬空指针
+        let entry = self.entry_mut(entry_idx);
+        let op_head_idx = entry.op_head_idx;
+        entry.op_head_idx = None;
+        entry.op_tail_idx = None;
 
-        if let Some(op_head_idx) = entry_desc.op_head_idx {
-            self.remove_op_chain(op_head_idx);
-            entry_desc.op_head_idx = None;
-            self.entry_descriptor_tbl[entry_idx] = Some(entry_desc);
+        // ✅ 现在删除 operations
+        if let Some(head_idx) = op_head_idx {
+            self.remove_op_chain(head_idx);
         }
 
         Ok(())
@@ -448,16 +503,17 @@ impl PatchingCacheContent {
 
     /// 获取 entry 的所有 operations
     pub fn ops(&self, entry_idx: usize) -> Vec<PatchingOperation> {
-        if let Some(desc) = self.entry_descriptor_tbl[entry_idx].as_ref() {
-            self.get_entry_ops(desc)
+        if let Some(_) = self.entry_descriptor_tbl[entry_idx].as_ref() {
+            self.get_entry_ops(entry_idx)
         } else {
             Vec::new()
         }
     }
 
-    fn get_entry_ops(&self, desc: &EntryDescriptor) -> Vec<PatchingOperation> {
+    fn get_entry_ops(&self, entry_idx: usize) -> Vec<PatchingOperation> {
+        let entry = self.entry_ref(entry_idx);
         let mut ops = Vec::new();
-        let mut current_idx = desc.op_head_idx;
+        let mut current_idx = entry.op_head_idx;
 
         while let Some(idx) = current_idx {
             if let Some(_op_desc) = self.op_descriptor_tbl[idx] {
@@ -473,22 +529,26 @@ impl PatchingCacheContent {
         ops
     }
 
-    /// 根据索引删除 entry（O(1) 复杂度，无需查找）
+    /// 根据索引删除 entry
     pub fn remove_by_idx(&mut self, entry_idx: usize) -> anyhow::Result<()> {
-        let entry_desc = self.entry_descriptor_tbl[entry_idx]
+        let _ = self.entry_descriptor_tbl[entry_idx]
             .ok_or_else(|| anyhow::anyhow!("Entry descriptor not found at index {}", entry_idx))?;
 
-        // 删除关联的所有 operations
-        if let Some(op_head_idx) = entry_desc.op_head_idx {
-            self.remove_op_chain(op_head_idx);
-        }
-
-        // 标记 entry descriptor 为 None（懒删除）
+        // ✅ 先读取 op_head_idx 并立即标记 entry 为删除
+        let entry = self.entry_ref(entry_idx);
+        let op_head_idx = entry.op_head_idx;
+        
+        // ✅ 立即标记 entry descriptor 为 None（防止在 remove_op_chain 触发 consolidate 后访问失效索引）
         self.entry_descriptor_tbl[entry_idx] = None;
         self.entry_pending_deletions += 1;
-        self.entry_valid_count = self.entry_valid_count.saturating_sub(1); // ✅ 减少有效 entry 计数
+        self.entry_valid_count = self.entry_valid_count.saturating_sub(1);
 
-        // 达到阈值时压缩
+        // ✅ 删除关联的所有 operations（可能触发 consolidate，但 entry 已被标记删除）
+        if let Some(head_idx) = op_head_idx {
+            self.remove_op_chain(head_idx);
+        }
+
+        // 达到阈值时压缩（consolidate 可能已在 remove_op_chain 中触发）
         if self.entry_pending_deletions > PENDING_DELETIONS_LIMIT {
             unsafe {
                 let _ = self.consolidate()?;
@@ -536,16 +596,18 @@ impl PatchingCacheContent {
 
     /// 压缩内存，移除空洞
     pub unsafe fn consolidate(&mut self) -> anyhow::Result<()> {
-        self.invalidate = true;
+        self.fuzzer_invalidate = true;
+        self.agent_invalidate = true;
 
         // 备份所有有效的 entries 和 operations
         let entries_with_ops: Vec<(PatchingCacheEntry, Vec<PatchingOperation>)> = self
-            .entry_descriptor_tbl
             .iter()
-            .filter_map(|desc| desc.as_ref())
-            .map(|desc| {
-                let entry = unsafe { self.entry_ref_by_offset(desc.start_offset).clone() };
-                let ops = self.get_entry_ops(desc);
+            .map(|entry_idx| {
+                let mut entry = self.entry_ref(entry_idx).clone();
+                let ops = self.get_entry_ops(entry_idx);
+
+                entry.op_head_idx = None;
+                entry.op_tail_idx = None;
                 (entry, ops)
             })
             .collect();
@@ -580,19 +642,22 @@ impl PatchingCacheContent {
                 break;
             }
 
-            if let Some(desc) = self.entry_descriptor_tbl[idx] {
-                let entry = unsafe { self.entry_mut_by_offset(desc.start_offset) };
+            if let Some(_) = self.entry_descriptor_tbl[idx] {
+                let entry = self.entry_mut(idx);
                 checked += 1;
 
                 if !f(entry) {
-                    // 删除这个 entry
-                    if let Some(op_head_idx) = desc.op_head_idx {
-                        self.remove_op_chain(op_head_idx);
-                    }
+                    // ✅ 先保存 op_head_idx 并立即标记 entry 为删除
+                    let op_head_idx = entry.op_head_idx;
                     self.entry_descriptor_tbl[idx] = None;
                     self.entry_pending_deletions += 1;
-                    self.entry_valid_count = self.entry_valid_count.saturating_sub(1); // ✅ 减少有效 entry 计数
+                    self.entry_valid_count = self.entry_valid_count.saturating_sub(1);
                     removed_count += 1;
+                    
+                    // ✅ 删除 operations（可能触发 consolidate，但 entry 已被标记删除）
+                    if let Some(head_idx) = op_head_idx {
+                        self.remove_op_chain(head_idx);
+                    }
                 }
             }
         }

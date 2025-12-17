@@ -124,6 +124,7 @@ pub struct PatchingCacheEntry {
     pub op_idx: Option<usize>,
 
     pub op_head_idx: Option<usize>,
+    
     pub op_tail_idx: Option<usize>,
 }
 

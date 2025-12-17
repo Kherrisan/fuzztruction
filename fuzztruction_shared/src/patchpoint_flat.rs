@@ -173,6 +173,13 @@ impl From<Option<&VarType>> for VarTypeFlat {
     }
 }
 
+#[repr(C, align(8))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapRangeFlat {
+    pub start: u64,
+    pub end: u64
+}
+
 /// 扁平化的 PatchPoint（固定大小，使用偏移量引用可变数据）
 #[repr(C, align(8))]
 #[derive(Debug, Clone, Copy)]
@@ -183,7 +190,8 @@ pub struct PatchPointFlat {
     pub func_idx: u32,    // 4 bytes
 
     // VMA
-    pub vma: u64, // 8 bytes
+    pub vma: u64,               // 8 bytes
+    pub range: MapRangeFlat,    // 16 bytes
 
     // ===== 函数名信息（使用偏移量）=====
     /// 函数名在可变数据区的偏移量（相对于 vardata_offset）
@@ -256,11 +264,12 @@ impl PatchPointFlat {
 const _: () = {
     // 确保大小合理（不超过 64 bytes）
     const PP_SIZE: usize = std::mem::size_of::<PatchPointFlat>();
-    assert!(PP_SIZE <= 64);
+    assert!(PP_SIZE <= 80);
     assert!(PP_SIZE % 8 == 0); // 8 字节对齐
 
     assert!(std::mem::size_of::<LiveOutFlat>() == 4);
     assert!(std::mem::size_of::<VarTypeFlat>() == 6);
+    assert!(std::mem::size_of::<MapRangeFlat>() == 16);
     assert!(std::mem::size_of::<CacheHeader>() == 16);
 };
 
@@ -474,6 +483,10 @@ impl<'a> PatchPointRef<'a> {
         self.pp.vma
     }
 
+    pub fn range(&self) -> &MapRangeFlat {
+        &self.pp.range
+    }
+
     /// 获取 LiveOuts
     pub fn live_outs(&self) -> &[LiveOutFlat] {
         self.pp.live_outs(self.vardata_base)
@@ -631,6 +644,10 @@ impl PatchPointCacheBuilder {
             ir_id: pp.llvm_id(),
             func_idx: pp.func_idx(),
             vma: pp.vma(),
+            range: MapRangeFlat {
+                start: pp.mapping().start() as u64,
+                end: pp.mapping().end() as u64,
+            },
             function_name_offset,
             function_name_len,
             loc_type: loc.loc_type,

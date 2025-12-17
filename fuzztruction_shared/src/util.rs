@@ -465,6 +465,19 @@ pub fn read_random_dev(size: usize) -> Vec<u8> {
     data
 }
 
+/// 宏：测量代码块执行时间并累加到指定变量中
+/// 用法：measure_sum!( 累加变量, { 代码块 } )
+#[macro_export]
+macro_rules! measure_total_time {
+    ($acc:expr, $block:block) => {{
+        let start = std::time::Instant::now();
+        let result = $block; // 执行代码块并获取返回值
+        let elapsed = start.elapsed();
+        $acc += chrono::Duration::from_std(elapsed).unwrap_or_default(); // 累加时间
+        result // 返回结果，保证逻辑连贯性
+    }};
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

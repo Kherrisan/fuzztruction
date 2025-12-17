@@ -42,6 +42,10 @@ impl MapRange {
     pub fn start(&self) -> usize {
         self.range_start
     }
+    /// Returns the address this MapRange ends at
+    pub fn end(&self) -> usize {
+        self.range_end
+    }
     /// Returns the filename of the loaded module
     pub fn filename(&self) -> &Option<String> {
         &self.pathname

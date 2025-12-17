@@ -146,9 +146,9 @@ where
         entries.into_iter().take(n).collect()
     }
 
-    #[allow(unused)]
-    pub(crate) fn contains(&self, id: U) -> bool {
-        self.entries().contains(&id)
+    pub fn contains(&self, id: U) -> bool {
+        let idx = self.idx(id.into());
+        self.data[idx.0] & (1 << idx.1) == 1
     }
 }
 

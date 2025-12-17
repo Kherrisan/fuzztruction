@@ -107,6 +107,14 @@ pub struct PatchPointIR {
 }
 
 impl PatchPointIR {
+    pub fn is_load(&self) -> bool {
+        self.ins == LLVMInstruction::Load
+    }
+
+    pub fn is_store(&self) -> bool {
+        self.ins == LLVMInstruction::Store
+    }
+
     pub fn is_offset_variable(&self) -> bool {
         self.detail.contains("offset")
     }
