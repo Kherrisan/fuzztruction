@@ -281,7 +281,10 @@ impl VarType {
                 VarType::Float { .. } => true,
                 VarType::Bitfield { .. } => self.num_bytes() <= 8,
                 VarType::Pointer { pointee: None, .. } => true,
-                VarType::Pointer { pointee: Some(pointee), .. } => match pointee.as_ref() {
+                VarType::Pointer {
+                    pointee: Some(pointee),
+                    ..
+                } => match pointee.as_ref() {
                     VarType::Int { .. } => true,
                     VarType::Float { .. } => true,
                     VarType::Bitfield { .. } => self.num_bytes() <= 8,
@@ -297,12 +300,13 @@ impl VarType {
             }
         } else {
             match self {
-                VarType::Int { .. } | VarType::Float { .. } | VarType::Pointer { .. } => true,
-                _ => {
-                    log::error!("Wrong var type in LLVM IR: {:#?}", self);
-                    panic!("Wrong var type in LLVM IR: {:#?}", self);
-                    false
-                }
+                VarType::Int { .. }
+                | VarType::Float { .. }
+                | VarType::Pointer { .. }
+                | VarType::Enum { .. }
+                | VarType::Union { .. }
+                | VarType::Bitfield { .. } => self.num_bytes() <= 8,
+                _ => false,
             }
         }
     }

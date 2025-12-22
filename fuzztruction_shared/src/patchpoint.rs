@@ -153,6 +153,10 @@ impl PatchPointIR {
             || (self.ins == LLVMInstruction::Call && self.detail.contains("memcmp"))
     }
 
+    pub fn is_trampoline(&self) -> bool {
+        self.pp_type == PatchpointType::TRAMPOLINE
+    }
+
     pub fn display_graph_node(&self, escape: bool) -> String {
         if let Some(var) = self.var.as_ref() {
             let name = if self.is_cmp() {
@@ -222,6 +226,8 @@ pub struct PatchPoint {
     mapping: MapRange,
     /// The VMA of the function that contains this PatchPoint.
     function_address: u64,
+    /// The instruction offset to the function it belongs to.
+    instruction_offset: u32,
     /// The location of the value that was spilled into the `spill_slot`.
     /// This is used to determine the values size, because the spill slot is
     /// located on the stack and therefore has a size that is a multiple of 8 (on 64bit).
@@ -253,6 +259,7 @@ impl PatchPoint {
         target_value_size_in_bit: u32,
         mapping: MapRange,
         function_address: u64,
+        instruction_offset: u32,
         live_outs: Vec<LiveOut>,
     ) -> Result<Self> {
         assert!(address + base > 0);
@@ -266,6 +273,7 @@ impl PatchPoint {
             location,
             mapping,
             function_address,
+            instruction_offset,
             target_value_size_in_bit,
             live_outs,
         })
@@ -440,6 +448,7 @@ impl PatchPoint {
                     target_value_size as u32,
                     mapping.clone(),
                     function_address,
+                    record.instruction_offset as u32,
                     record.live_outs.clone(),
                 ) {
                     patch_points.push(pp);

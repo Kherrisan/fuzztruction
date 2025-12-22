@@ -153,12 +153,14 @@ impl From<Option<&VarType>> for VarTypeFlat {
             match vt {
                 VarType::Int { .. }
                 | VarType::Float { .. }
-                | VarType::Pointer { pointee: None, .. } => {
+                | VarType::Pointer { pointee: None, .. }
+                | VarType::Enum { .. }
+                | VarType::Union { .. }
+                | VarType::Bitfield { .. } => {
                     (VarTypeKind::Int, vt.num_bytes() as u16, false, true)
                 }
                 _ => {
-                    log::error!("Wrong var type in LLVM IR register: {:#?}", vt);
-                    panic!("Wrong var type in LLVM IR register: {:#?}", vt);
+                    (VarTypeKind::None, 0, false, true)
                 }
             }
         };
@@ -177,7 +179,7 @@ impl From<Option<&VarType>> for VarTypeFlat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapRangeFlat {
     pub start: u64,
-    pub end: u64
+    pub end: u64,
 }
 
 /// 扁平化的 PatchPoint（固定大小，使用偏移量引用可变数据）
@@ -190,8 +192,8 @@ pub struct PatchPointFlat {
     pub func_idx: u32,    // 4 bytes
 
     // VMA
-    pub vma: u64,               // 8 bytes
-    pub range: MapRangeFlat,    // 16 bytes
+    pub vma: u64,            // 8 bytes
+    pub range: MapRangeFlat, // 16 bytes
 
     // ===== 函数名信息（使用偏移量）=====
     /// 函数名在可变数据区的偏移量（相对于 vardata_offset）
