@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use get_size::GetSize;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,6 +21,7 @@ use std::{
     Serialize,
     Deserialize,
     Default,
+    GetSize,
 )]
 #[repr(C)]
 pub struct PatchPointID(pub u32);

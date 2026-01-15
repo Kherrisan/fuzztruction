@@ -231,6 +231,10 @@ impl PatchingCacheEntry {
         self
     }
 
+    pub fn is_flag_not_nop(&self, flag: PatchingCacheEntryFlags) -> bool {
+        self.dirty[flag as usize] != PatchingCacheEntryDirty::Nop
+    }
+
     pub fn flag(&self, flag: PatchingCacheEntryFlags) -> PatchingCacheEntryDirty {
         self.dirty[flag as usize]
     }

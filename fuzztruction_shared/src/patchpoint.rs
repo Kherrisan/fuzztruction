@@ -165,7 +165,7 @@ impl PatchPointIR {
                 var.as_string()
             };
             format!(
-                "{}(#{}){} {}:{}:{}",
+                "{}(ir#{}){} {}:{}:{}",
                 name,
                 self.id,
                 if escape { "\\n" } else { "\n" },

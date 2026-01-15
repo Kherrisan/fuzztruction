@@ -47,11 +47,33 @@ impl VarDeclRef {
         }
     }
 
+    pub fn as_typed_string(&self) -> String {
+        if let Some(parent) = self.parent.as_ref() {
+            format!(
+                "{} -> {}: {}",
+                parent.as_string(),
+                self.type_enum(),
+                self.name
+            )
+        } else {
+            format!("{}: {}", self.type_enum(), self.name)
+        }
+    }
+
     pub fn as_string(&self) -> String {
         if let Some(parent) = self.parent.as_ref() {
-            format!("{}->{}", parent.as_string(), self.name)
+            format!("{} -> {}", parent.as_string(), self.name)
         } else {
             format!("{}", self.name)
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn token_cnt(&self) -> usize {
+        if let Some(parent) = self.parent.as_ref() {
+            parent.token_cnt() + 2
+        } else {
+            2
         }
     }
 }

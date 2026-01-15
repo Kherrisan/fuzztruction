@@ -718,11 +718,44 @@ impl PatchingCache {
     }
 
     pub fn log_dirty_flags(&self) {
-        if self.len() < 100 {
-            self.iter().for_each(|e| {
-                log::trace!("{}: {}", e.id().0, flags_to_str(e.dirty_flags()));
-            });
-        }
+        let mut total = 0;
+        let mut patching_entries = vec![];
+        self.iter().for_each(|e| {
+            if total < 100
+                && (e.is_flag_not_nop(PatchingCacheEntryFlags::Patching)
+                    || e.is_flag_not_nop(PatchingCacheEntryFlags::Jumping))
+            {
+                patching_entries.push((e.id(), flags_to_str(e.dirty_flags())));
+                total += 1;
+            }
+        });
+
+        patching_entries.sort_by_key(|(id, _)| *id);
+        let str = patching_entries.iter().map(|(id, flags)| format!("{}: {}", id.0, flags)).collect::<Vec<_>>().join("\n");
+
+        log::trace!(
+            "\n===============Patching cache dirty flags of patching entries===============\n{}",
+            str
+        );
+
+        let mut tracing_entries = vec![];
+        self.iter().for_each(|e| {
+            if total < 100
+                && (e.is_flag_not_nop(PatchingCacheEntryFlags::Tracing)
+                    || e.is_flag_not_nop(PatchingCacheEntryFlags::TracingVal))
+            {
+                tracing_entries.push((e.id(), flags_to_str(e.dirty_flags())));
+                total += 1;
+            }
+        });
+
+        tracing_entries.sort_by_key(|(id, _)| *id);
+        let str = tracing_entries.iter().map(|(id, flags)| format!("{}: {}", id.0, flags)).collect::<Vec<_>>().join("\n");
+
+        log::trace!(
+            "\n===============Patching cache dirty flags of tracing entries===============\n{}",
+            str
+        );
     }
 
     pub fn get_idx(&self, pp: PatchPointID) -> Option<usize> {
