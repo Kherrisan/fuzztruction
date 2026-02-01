@@ -115,6 +115,10 @@ impl PatchPointIR {
         self.ins == LLVMInstruction::Store
     }
 
+    pub fn is_branch(&self) -> bool {
+        self.ins == LLVMInstruction::Br || self.ins == LLVMInstruction::Switch
+    }
+
     pub fn is_offset_variable(&self) -> bool {
         self.detail.contains("offset")
     }
