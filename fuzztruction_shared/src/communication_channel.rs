@@ -143,6 +143,18 @@ impl CommunicationChannel {
                     SyncPatchings::try_from_bytes(&buffer)?,
                 ))
             }
+            MessageType::MsgIdOk => return Ok(ReceivableMessages::Ok(Ok::try_from_bytes(&buffer)?)),
+            MessageType::ChildPid => {
+                return Ok(ReceivableMessages::ChildPid(ChildPid::try_from_bytes(
+                    &buffer,
+                )?))
+            }
+            MessageType::MsgIdPing => {
+                return Ok(ReceivableMessages::Ping(Ping::try_from_bytes(&buffer)?))
+            }
+            MessageType::MsgIdPong => {
+                return Ok(ReceivableMessages::Pong(Pong::try_from_bytes(&buffer)?))
+            }
             _ => {
                 panic!("Received message with invalid message ID {:#?}", header.id)
             }

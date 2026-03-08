@@ -105,6 +105,11 @@ pub enum VarType {
     Int { width: u16, typedef: Option<String> },
     #[display("f{width}")]
     Float { width: u16, typedef: Option<String> },
+    #[display("{name}")]
+    Enum {
+        name: String,
+        typedef: Option<String>,
+    },
     #[display("{pointee:?}*")]
     Pointer {
         pointee: Option<Box<VarType>>,
@@ -118,11 +123,6 @@ pub enum VarType {
     },
     #[display("{name}")]
     Struct {
-        name: String,
-        typedef: Option<String>,
-    },
-    #[display("{name}")]
-    Enum {
         name: String,
         typedef: Option<String>,
     },
@@ -301,6 +301,7 @@ impl VarType {
             match &derefed_type {
                 VarType::Int { .. } => true,
                 VarType::Float { .. } => true,
+                VarType::Enum { .. } => true,
                 VarType::Bitfield { .. } => self.num_bytes() <= 8,
                 VarType::Pointer { pointee: None, .. } => true,
                 VarType::Pointer {
@@ -309,24 +310,25 @@ impl VarType {
                 } => match pointee.as_ref() {
                     VarType::Int { .. } => true,
                     VarType::Float { .. } => true,
+                    VarType::Enum { .. } => true,
                     VarType::Bitfield { .. } => self.num_bytes() <= 8,
-                    _ => false,
+                    _ => true,
                 },
                 VarType::Array { element, .. } => match element.as_ref() {
                     VarType::Int { .. } => true,
                     VarType::Float { .. } => true,
+                    VarType::Enum { .. } => true,
                     VarType::Bitfield { .. } => self.num_bytes() <= 8,
                     _ => false,
                 },
-                _ => false,
+                _ => true,
             }
         } else {
             match self {
                 VarType::Int { .. }
                 | VarType::Float { .. }
-                | VarType::Pointer { .. }
+                | VarType::Pointer { .. } // Pointer { None }
                 | VarType::Enum { .. }
-                | VarType::Union { .. }
                 | VarType::Bitfield { .. } => self.num_bytes() <= 8,
                 _ => false,
             }
@@ -338,7 +340,10 @@ impl VarType {
             return Ok("null".to_string());
         }
         match self {
-            VarType::Void => Ok("void".to_string()),
+            VarType::Enum { .. } => {
+                let val = u32::from_le_bytes(value[..4].try_into()?) as u64;
+                Ok(format!("{}", val))
+            },
             VarType::Int { width, .. } => {
                 let val = if *width <= 8 {
                     value[0] as u64
@@ -376,10 +381,6 @@ impl VarType {
                     ((u64::from_le_bytes(value[..8].try_into()?) as u128 & mask) >> *offset) as u128
                 };
                 Ok(format!("{}", val))
-            }
-            VarType::Pointer { pointee: None, .. } => {
-                let address = u64::from_le_bytes(value[..8].try_into()?) as usize;
-                Ok(format!("0x{:x}", address))
             }
             VarType::Pointer {
                 pointee: Some(pointee_type),
@@ -420,10 +421,18 @@ impl VarType {
                 result.push(']');
                 Ok(result)
             }
-            VarType::Enum { name, .. } => Ok(format!("{}", name)),
-            VarType::Union { name, .. } => Ok(format!("{}", name)),
-            VarType::Other { name, .. } => Ok(format!("{}", name)),
-            VarType::Struct { name, .. } => Ok(format!("{}", name)),
+            VarType::Pointer { pointee: None, .. }
+            | VarType::Union { .. }
+            | VarType::Other { .. }
+            | VarType::Void
+            | VarType::Struct { .. } => {
+                let address = u64::from_le_bytes(value[..8].try_into()?) as usize;
+                if address == 0 {
+                    Ok("null".to_string())
+                } else {
+                    Ok("notnull".to_string())
+                }
+            }
         }
     }
 

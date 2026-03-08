@@ -447,7 +447,14 @@ impl PatchingCache {
             fd = libc::shm_open(name_c.as_ptr(), flags, 0o777);
             trace!("shm fd={}", fd);
             if fd < 0 {
-                let err = format!("Failed to open shm {}", name);
+                let os_err = std::io::Error::last_os_error();
+                let err = format!(
+                    "Failed to open shm {} (errno={:?}, uid={}, euid={})",
+                    name,
+                    os_err,
+                    libc::getuid(),
+                    libc::geteuid()
+                );
                 error!("{}", err);
                 return Err(PatchingCacheError::ShmError(err));
             }
@@ -756,6 +763,66 @@ impl PatchingCache {
             "\n===============Patching cache dirty flags of tracing entries===============\n{}",
             str
         );
+    }
+
+    /// Print a 4x4 ASCII table:
+    /// rows = flag (Tracing/TracingVal/Patching/Jumping)
+    /// cols = dirty state (Nop/Dirty/Clear/Enable)
+    pub fn dirty_flag_matrix(&self) -> String {
+        const FLAGS: [PatchingCacheEntryFlags; 4] = [
+            PatchingCacheEntryFlags::Tracing,
+            PatchingCacheEntryFlags::TracingVal,
+            PatchingCacheEntryFlags::Patching,
+            PatchingCacheEntryFlags::Jumping,
+        ];
+        const STATES: [PatchingCacheEntryDirty; 4] = [
+            PatchingCacheEntryDirty::Nop,
+            PatchingCacheEntryDirty::Dirty,
+            PatchingCacheEntryDirty::Clear,
+            PatchingCacheEntryDirty::Enable,
+        ];
+
+        let mut matrix = [[0usize; 4]; 4];
+        for entry in self.iter() {
+            for (fi, flag) in FLAGS.iter().enumerate() {
+                let dirty = entry.flag(*flag);
+                if let Some(si) = STATES.iter().position(|s| *s == dirty) {
+                    matrix[fi][si] += 1;
+                }
+            }
+        }
+
+        let headers = ["Flag", "Nop", "Dirty", "Clear", "Enable"];
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "+{:-<14}+{:-<10}+{:-<10}+{:-<10}+{:-<10}+",
+            "", "", "", "", ""
+        ));
+        lines.push(format!(
+            "| {:<12} | {:>8} | {:>8} | {:>8} | {:>8} |",
+            headers[0], headers[1], headers[2], headers[3], headers[4]
+        ));
+        lines.push(format!(
+            "+{:-<14}+{:-<10}+{:-<10}+{:-<10}+{:-<10}+",
+            "", "", "", "", ""
+        ));
+
+        for (fi, flag) in FLAGS.iter().enumerate() {
+            lines.push(format!(
+                "| {:<12} | {:>8} | {:>8} | {:>8} | {:>8} |",
+                flag.to_string(),
+                matrix[fi][0],
+                matrix[fi][1],
+                matrix[fi][2],
+                matrix[fi][3]
+            ));
+        }
+        lines.push(format!(
+            "+{:-<14}+{:-<10}+{:-<10}+{:-<10}+{:-<10}+",
+            "", "", "", "", ""
+        ));
+
+        lines.join("\n")
     }
 
     pub fn get_idx(&self, pp: PatchPointID) -> Option<usize> {
@@ -1540,6 +1607,12 @@ impl PatchingCache {
 }
 
 impl PatchingCache {
+    /// Dump entries whose Patching or Jumping flag is Dirty/Enable,
+    /// together with their ops.
+    pub fn dump_non_tracing_entries_with_ops(&self) -> String {
+        self.content().dump_non_tracing_entries_with_ops()
+    }
+
     pub fn remove_uncovered(&mut self, trace: &Trace) -> &mut Self {
         let covered_ids = trace.items().iter().map(|i| i.id).collect::<HashSet<_>>();
         self.retain(|e| covered_ids.contains(&e.id().0));

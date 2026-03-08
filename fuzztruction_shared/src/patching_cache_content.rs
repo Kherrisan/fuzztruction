@@ -1,7 +1,9 @@
 use std::{cmp::min, mem, ptr};
 
 use crate::{
+    patching_cache::PatchingCacheEntryFlags,
     patching_cache_entry::{PatchingCacheEntry, PatchingOperation},
+    patching_cache_entry::{PatchingCacheEntryDirty, flags_to_str},
     types::PatchPointID,
 };
 
@@ -272,6 +274,12 @@ impl PatchingCacheContent {
         unsafe { self.op_ref_by_offset(op_desc.start_offset) }
     }
 
+    /// 安全版本：通过 descriptor 索引获取 operation 引用
+    pub fn op_ref_opt(&self, descriptor_idx: usize) -> Option<&PatchingOperation> {
+        let op_desc = self.op_descriptor_tbl.get(descriptor_idx)?.as_ref()?;
+        Some(unsafe { self.op_ref_by_offset(op_desc.start_offset) })
+    }
+
     /// 通过 descriptor 索引获取 operation 可变引用
     pub fn op_mut(&self, descriptor_idx: usize) -> &mut PatchingOperation {
         let op_desc = self.op_descriptor_tbl[descriptor_idx]
@@ -368,9 +376,10 @@ impl PatchingCacheContent {
         // ✅ 当空间利用率过高时，触发 consolidate
         if self.space_left() < self.total_space() / 10 {
             log::debug!("Space utilization high, triggering consolidate");
-            unsafe {
-                let _ = self.consolidate();
-            }
+            // TEMPORARY: disable consolidate for debugging op descriptor mismatch.
+            // unsafe {
+            //     let _ = self.consolidate();
+            // }
         }
 
         Ok(descriptor_idx)
@@ -510,6 +519,63 @@ impl PatchingCacheContent {
         }
     }
 
+    /// Dump entries whose Patching or Jumping flag is Dirty/Enable,
+    /// together with their ops.
+    pub fn dump_non_tracing_entries_with_ops(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            "PatchingCache(active patch+jump snapshot): total_entries={}",
+            self.entry_count()
+        ));
+
+        let mut dumped = 0usize;
+        for entry_idx in self.iter() {
+            let entry = self.entry_ref(entry_idx);
+            let patching_flag = entry.flag(PatchingCacheEntryFlags::Patching);
+            let jumping_flag = entry.flag(PatchingCacheEntryFlags::Jumping);
+
+            let patching_active = matches!(
+                patching_flag,
+                PatchingCacheEntryDirty::Dirty | PatchingCacheEntryDirty::Enable
+            );
+            let jumping_active = matches!(
+                jumping_flag,
+                PatchingCacheEntryDirty::Dirty | PatchingCacheEntryDirty::Enable
+            );
+
+            // Keep entries where either Patching or Jumping is active.
+            if !(patching_active || jumping_active) {
+                continue;
+            }
+
+            dumped += 1;
+            lines.push(format!(
+                "  entry_idx={} id={} flags=[{}] ctx={:?} op_idx={:?} op_head_idx={:?} op_tail_idx={:?}",
+                entry_idx,
+                entry.id().0,
+                flags_to_str(&entry.dirty),
+                entry.ctx,
+                entry.op_idx,
+                entry.op_head_idx,
+                entry.op_tail_idx
+            ));
+
+            let ops = self.ops(entry_idx);
+            if ops.is_empty() {
+                lines.push("    ops: (empty)".to_string());
+            } else {
+                for (i, op) in ops.iter().enumerate() {
+                    lines.push(format!("    op[{i}]: {:?}", op));
+                }
+            }
+        }
+
+        if dumped == 0 {
+            lines.push("  (no non-tracing entries)".to_string());
+        }
+        lines.join("\n")
+    }
+
     fn get_entry_ops(&self, entry_idx: usize) -> Vec<PatchingOperation> {
         let entry = self.entry_ref(entry_idx);
         let mut ops = Vec::new();
@@ -550,9 +616,10 @@ impl PatchingCacheContent {
 
         // 达到阈值时压缩（consolidate 可能已在 remove_op_chain 中触发）
         if self.entry_pending_deletions > PENDING_DELETIONS_LIMIT {
-            unsafe {
-                let _ = self.consolidate()?;
-            }
+            // TEMPORARY: disable consolidate for debugging op descriptor mismatch.
+            // unsafe {
+            //     let _ = self.consolidate()?;
+            // }
         }
 
         Ok(())
@@ -587,15 +654,21 @@ impl PatchingCacheContent {
             }
         }
 
-        if self.op_pending_deletions > PENDING_DELETIONS_LIMIT {
-            unsafe {
-                let _ = self.consolidate();
-            }
-        }
+        // NOTE:
+        // Do not auto-consolidate here. Callers that perform batched updates
+        // (e.g., cache union / op replacement) rely on stable entry indexes
+        // during the batch. Consolidation is deferred to higher-level boundaries.
     }
 
     /// 压缩内存，移除空洞
     pub unsafe fn consolidate(&mut self) -> anyhow::Result<()> {
+        log::info!(
+            "[patching-cache-consolidate] begin: entry_count={}, op_count={}, entry_pending_deletions={}, op_pending_deletions={}",
+            self.entry_count(),
+            self.op_count(),
+            self.entry_pending_deletions,
+            self.op_pending_deletions
+        );
         self.fuzzer_invalidate = true;
         self.agent_invalidate = true;
 
@@ -621,6 +694,14 @@ impl PatchingCacheContent {
             if !ops.is_empty() {
                 self.push_op_batch(entry_idx, &ops)?;
             }
+        }
+
+        // After consolidate, force all Enable flags back to Dirty so stubs will
+        // re-enter the sync/compile path with fresh descriptors.
+        let entry_indices: Vec<usize> = self.iter().collect();
+        for idx in entry_indices {
+            self.entry_mut(idx)
+                .set_by(PatchingCacheEntryDirty::Enable, PatchingCacheEntryDirty::Dirty);
         }
 
         Ok(())
@@ -663,9 +744,10 @@ impl PatchingCacheContent {
         }
 
         if self.entry_pending_deletions > PENDING_DELETIONS_LIMIT {
-            unsafe {
-                let _ = self.consolidate();
-            }
+            // TEMPORARY: disable consolidate for debugging op descriptor mismatch.
+            // unsafe {
+            //     let _ = self.consolidate();
+            // }
         }
 
         removed_count

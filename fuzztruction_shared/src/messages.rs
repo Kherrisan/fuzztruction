@@ -32,6 +32,8 @@ pub enum MessageType {
     KeepAlive = 14,
     ChildPid = 15,
     AuxStreamMessage = 16,
+    MsgIdPing = 17,
+    MsgIdPong = 18,
 }
 
 impl Default for MessageType {
@@ -56,6 +58,8 @@ impl TryFrom<u8> for MessageType {
             x if x == MessageType::KeepAlive as u8 => MessageType::KeepAlive,
             x if x == MessageType::ChildPid as u8 => MessageType::ChildPid,
             x if x == MessageType::AuxStreamMessage as u8 => MessageType::AuxStreamMessage,
+            x if x == MessageType::MsgIdPing as u8 => MessageType::MsgIdPing,
+            x if x == MessageType::MsgIdPong as u8 => MessageType::MsgIdPong,
             _ => return Err(()),
         };
         Ok(ret)
@@ -502,6 +506,66 @@ impl Message for ChildPid {
 }
 
 #[derive(Debug, Clone)]
+#[repr(C)]
+pub struct Ping {
+    header: MsgHeader,
+}
+
+impl Ping {
+    pub fn new() -> Self {
+        Ping {
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for Ping {
+    fn default() -> Self {
+        Ping {
+            header: MsgHeader::new(MessageType::MsgIdPing),
+        }
+    }
+}
+impl Message for Ping {
+    fn message_type() -> MessageType {
+        MessageType::MsgIdPing
+    }
+    fn sanitize(&self) -> Result<()> {
+        Ok(self.header.sanitize()?)
+    }
+}
+
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct Pong {
+    header: MsgHeader,
+}
+
+impl Pong {
+    pub fn new() -> Self {
+        Pong {
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for Pong {
+    fn default() -> Self {
+        Pong {
+            header: MsgHeader::new(MessageType::MsgIdPong),
+        }
+    }
+}
+impl Message for Pong {
+    fn message_type() -> MessageType {
+        MessageType::MsgIdPong
+    }
+    fn sanitize(&self) -> Result<()> {
+        Ok(self.header.sanitize()?)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum ReceivableMessages {
     HelloMessage(HelloMessage),
     RunMessage(RunMessage),
@@ -511,6 +575,8 @@ pub enum ReceivableMessages {
     SyncPatchings(SyncPatchings),
     Ok(Ok),
     ChildPid(ChildPid),
+    Ping(Ping),
+    Pong(Pong),
 }
 
 #[cfg(test)]

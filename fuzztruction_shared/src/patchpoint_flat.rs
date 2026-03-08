@@ -115,47 +115,37 @@ impl From<Option<&VarType>> for VarTypeFlat {
             match deref {
                 VarType::Int { .. }
                 | VarType::Float { .. }
-                | VarType::Struct { .. }
                 | VarType::Enum { .. }
-                | VarType::Union { .. }
                 | VarType::Bitfield { .. } => {
                     (VarTypeKind::Int, deref.num_bytes() as u16, false, false)
                 }
                 VarType::Array { .. } => {
                     (VarTypeKind::Array, deref.num_bytes() as u16, false, false)
                 }
-                VarType::Pointer { pointee: None, .. } => {
-                    // 64 bytes for opaque pointer
-                    // Same as i64
-                    (VarTypeKind::Int, 8, false, false)
-                }
                 VarType::Pointer {
-                    pointee: Some(pointee),
+                    pointee: Some(pointee), // A pointer variable in the memory
                     ..
                 } => match pointee.as_ref() {
                     VarType::Int { .. }
                     | VarType::Float { .. }
-                    | VarType::Struct { .. }
                     | VarType::Enum { .. }
-                    | VarType::Union { .. }
                     | VarType::Bitfield { .. } => {
                         (VarTypeKind::Int, pointee.num_bytes() as u16, true, false)
                     }
                     VarType::Array { .. } => {
                         (VarTypeKind::Array, pointee.num_bytes() as u16, true, false)
                     }
-                    _ => (VarTypeKind::None, 0, true, false),
+                    _ => (VarTypeKind::Int, 8, false, true),
                 },
-                _ => (VarTypeKind::None, 0, false, false),
+                _ => (VarTypeKind::Int, 8, false, true),
             }
         } else {
-            // deference() returns none, means that it is a register variable.
+            // deference() returns none, means that it is a register value.
             match vt {
                 VarType::Int { .. }
                 | VarType::Float { .. }
                 | VarType::Pointer { pointee: None, .. }
                 | VarType::Enum { .. }
-                | VarType::Union { .. }
                 | VarType::Bitfield { .. } => {
                     (VarTypeKind::Int, vt.num_bytes() as u16, false, true)
                 }

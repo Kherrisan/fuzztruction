@@ -412,8 +412,19 @@ impl PatchPoint {
                 assert_eq!(locations.len(), 2);
 
                 let spill_slot_location = &locations[0];
+                if spill_slot_location.loc_type == LocationType::Indirect {
+                    log::warn!(
+                        "Skipping patchpoint {} due to unsupported stackmap location type: Indirect",
+                        record.patch_point_id
+                    );
+                    return;
+                }
                 if spill_slot_location.loc_type == LocationType::ConstIndex {
-                    println!("patchpoint ir id: {}", record.patch_point_id);
+                    log::warn!(
+                        "Skipping patchpoint {} due to unsupported stackmap location type: ConstIndex",
+                        record.patch_point_id
+                    );
+                    return;
                 }
                 assert_matches!(
                     spill_slot_location.loc_type,
