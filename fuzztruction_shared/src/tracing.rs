@@ -2,6 +2,8 @@ use anyhow::{Result, anyhow};
 use core::slice;
 use serde::{Deserialize, Serialize};
 use std::{
+    env,
+    sync::atomic::{AtomicUsize, Ordering},
     cell::UnsafeCell,
     collections::{HashMap, HashSet},
     ffi::CString,
@@ -16,7 +18,7 @@ use crate::{constants::ENV_FT_SET_SHM, types::PatchPointID};
 use super::shared_memory::MmapShMem;
 
 pub const ENV_FT_TRACE_SHM: &str = "TRACE";
-pub const DEFAULT_TRACE_MAP_LEN: usize = 0x10000;
+pub const DEFAULT_TRACE_MAP_LEN: usize = 0x1000000;
 
 #[derive(Clone)]
 pub struct TraceVector {
@@ -159,8 +161,7 @@ impl TraceVector {
     }
 
     pub fn hit(&mut self, id: u32) {
-        let empty_slice: Vec<u8> = vec![];
-        self.hit_slice(id, &empty_slice);
+        self.hit_slice(id, &[]);
     }
 
     pub fn hit_value<T>(&mut self, id: u32, value: T) {
@@ -171,29 +172,46 @@ impl TraceVector {
     }
 
     pub fn hit_slice(&mut self, id: u32, value: &[u8]) {
+        let hit_len = value.len() as u32;
         let align = std::mem::align_of::<TraceVectorEntry>();
-        let base_ptr = unsafe { self.data_mut_ptr().add(self.header().offset) };
-        let alignment_offset = base_ptr.align_offset(align) as usize;
-
-        if alignment_offset == usize::MAX {
-            // 无法对齐，需要处理这种情况
-            println!("Cannot align pointer");
-            panic!("Cannot align pointer");
-        }
-
         let entry_size = size_of::<TraceVectorEntry>() + value.len();
-        let total_size = alignment_offset + entry_size;
+        let (prev_offset, alignment_offset, total_size) = loop {
+            let current_offset = self.offset();
+            let base_ptr = unsafe { self.data_mut_ptr().add(current_offset) };
+            let alignment_offset = base_ptr.align_offset(align) as usize;
 
-        if self.header().offset + total_size > self.memory_capacity() {
-            println!("TraceVector is full of capacity after pushing this item: ");
-            println!("current offset: {}", self.header().offset);
-            println!("entry total size: {}", total_size);
-            println!("memory capacity: {}", self.memory_capacity());
-            panic!("TraceVector is full of capacity: {}", self.capacity());
-        }
+            if alignment_offset == usize::MAX {
+                panic!("Cannot align pointer");
+            }
+
+            let total_size = alignment_offset + entry_size;
+            let new_offset = current_offset + total_size;
+
+            if new_offset > self.memory_capacity() {
+                panic!("TraceVector is full of capacity: {}", self.capacity());
+            }
+
+            if self
+                .header()
+                .offset
+                .compare_exchange(
+                    current_offset,
+                    new_offset,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break (current_offset, alignment_offset, total_size);
+            }
+        };
+        let prev_len = self.header().len.fetch_add(1, Ordering::AcqRel);
+        let new_len = prev_len + 1;
+        let new_offset = prev_offset + total_size;
 
         // 写入 entry
         unsafe {
+            let base_ptr = self.data_mut_ptr().add(prev_offset);
             let aligned_ptr = (base_ptr as *mut u8).add(alignment_offset);
             let entry_ptr = aligned_ptr as *mut TraceVectorEntry;
 
@@ -204,17 +222,13 @@ impl TraceVector {
             );
 
             (*entry_ptr).id = id;
-            (*entry_ptr).length = value.len() as u32;
+            (*entry_ptr).length = hit_len;
 
             // 复制 value 数据
             let value_offset = std::mem::size_of::<TraceVectorEntry>();
             let value_ptr = (entry_ptr as *mut u8).add(value_offset);
             std::ptr::copy_nonoverlapping(value.as_ptr(), value_ptr, value.len());
         }
-
-        // 更新 header，包括对齐偏移量
-        self.header_mut().len += 1;
-        self.header_mut().offset += total_size;
 
         // println!(
         //     "Hit: id: {}, length: {}, offset: {}",
@@ -259,8 +273,8 @@ impl TraceVector {
     }
 
     pub fn clear(&mut self) {
-        self.header_mut().len = 0;
-        self.header_mut().offset = 0;
+        self.header().len.store(0, Ordering::Release);
+        self.header().offset.store(0, Ordering::Release);
     }
 
     pub fn items(&self, blacklist: &HashSet<PatchPointID>) -> Vec<TraceItem> {
@@ -272,12 +286,12 @@ impl TraceVector {
             .collect()
     }
 
-    pub fn len_mut(&mut self) -> &mut usize {
-        &mut self.header_mut().len
+    pub fn len(&self) -> usize {
+        self.header().len.load(Ordering::Acquire)
     }
 
-    pub fn len(&self) -> usize {
-        self.header().len
+    pub fn offset(&self) -> usize {
+        self.header().offset.load(Ordering::Acquire)
     }
 
     pub fn capacity(&self) -> usize {
@@ -285,6 +299,10 @@ impl TraceVector {
     }
 
     pub fn unlink(&self) {
+        if env::var("PINGU_GDB").is_ok() {
+            log::info!("PINGU_GDB is set, skipping unlinking of trace map");
+            return;
+        }
         unsafe {
             let cname = CString::new(self._shared_memory.path()).unwrap();
             libc::shm_unlink(cname.as_ptr());
@@ -317,7 +335,28 @@ impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            log::trace!(
+                "TraceVectorIterator::next begin current_idx={} current_offset={} header_len={} header_offset={}",
+                self.current_idx,
+                self.current_offset,
+                self.trace_vector.len(),
+                self.trace_vector.offset()
+            );
+            let written_bytes = self.trace_vector.offset();
             if self.current_idx >= self.trace_vector.len() {
+                log::trace!(
+                    "TraceVectorIterator::next stop current_idx>=header_len ({}>={})",
+                    self.current_idx,
+                    self.trace_vector.len()
+                );
+                return None;
+            }
+            if self.current_offset >= written_bytes {
+                log::trace!(
+                    "TraceVectorIterator::next stop current_offset>=written_bytes ({}>={})",
+                    self.current_offset,
+                    written_bytes
+                );
                 return None;
             }
 
@@ -333,16 +372,36 @@ impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
 
             // 应用对齐偏移
             self.current_offset += alignment_offset;
+            if self.current_offset + size_of::<TraceVectorEntry>() > written_bytes {
+                log::trace!(
+                    "TraceVectorIterator::next stop header boundary before read: current_offset={} header_size={} written_bytes={}",
+                    self.current_offset,
+                    size_of::<TraceVectorEntry>(),
+                    written_bytes
+                );
+                return None;
+            }
 
             let entry = unsafe {
                 let ptr =
                     self.trace_vector.data_ptr().add(self.current_offset) as *const TraceVectorEntry;
                 &*ptr
             };
+            let next_offset = self.current_offset + size_of::<TraceVectorEntry>() + entry.length as usize;
+            if next_offset > written_bytes {
+                log::trace!(
+                    "TraceVectorIterator::next stop next_offset>written_bytes next_offset={} written_bytes={} entry_id={} entry_len={}",
+                    next_offset,
+                    written_bytes,
+                    entry.id,
+                    entry.length
+                );
+                return None;
+            }
 
             // 更新索引和偏移量，为下一次迭代做准备
             self.current_idx += 1;
-            self.current_offset += size_of::<TraceVectorEntry>() + entry.length as usize;
+            self.current_offset = next_offset;
 
             // 如果 entry.id 在黑名单中，跳过并继续循环
             if self.blacklist.contains(&PatchPointID(entry.id)) {
@@ -358,8 +417,8 @@ impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
 #[repr(C)]
 struct TraceVectorHeader {
     capacity: usize,
-    len: usize,
-    offset: usize,
+    len: AtomicUsize,
+    offset: AtomicUsize,
     data: [TraceVectorEntry; 0],
 }
 
@@ -374,8 +433,8 @@ impl TraceVectorHeader {
 
             if create {
                 header.capacity = total_size - size_of::<Self>();
-                header.len = 0;
-                header.offset = 0;
+                std::ptr::write(&mut header.len, AtomicUsize::new(0));
+                std::ptr::write(&mut header.offset, AtomicUsize::new(0));
             }
 
             return Ok(header as *mut TraceVectorHeader);

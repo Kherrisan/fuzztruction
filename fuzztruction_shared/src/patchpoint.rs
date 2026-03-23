@@ -13,7 +13,7 @@ use crate::{
 };
 use llvm_stackmap::{LLVMInstruction, LiveOut, Location, LocationType, StackMap};
 use proc_maps::MapRange;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InstrumentMethod {
@@ -76,6 +76,26 @@ pub enum StateVarType {
     Asan,
 }
 
+fn deserialize_optional_state_var_type<'de, D>(
+    deserializer: D,
+) -> Result<Option<StateVarType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    match raw.trim() {
+        "" => Ok(None),
+        "arg" => Ok(Some(StateVarType::Arg)),
+        "ret" => Ok(Some(StateVarType::Ret)),
+        "asan" => Ok(Some(StateVarType::Asan)),
+        other => Err(de::Error::unknown_variant(other, &["arg", "ret", "asan", ""])),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PatchpointType {
     ENTRY,
@@ -91,6 +111,7 @@ pub struct PatchPointIR {
     pub svfg_id: Option<u32>,
     pub pag_id: Option<u32>,
     pub icfg_id: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_state_var_type")]
     pub is_state_var: Option<StateVarType>,
     pub module: String,
     pub file: String,

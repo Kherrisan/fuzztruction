@@ -203,8 +203,15 @@ impl Drop for MmapShMem {
                 "FD should never be -1 for MmapShMem (on Drop)"
             );
 
-            let c_path = CString::new(self.path.clone()).unwrap();
-            shm_unlink(c_path.as_ptr() as *const _);
+            if env::var("PINGU_GDB").is_ok() {
+                log::info!(
+                    "PINGU_GDB is set, skipping shm_unlink for shared memory: {}",
+                    self.path
+                );
+            } else {
+                let c_path = CString::new(self.path.clone()).unwrap();
+                shm_unlink(c_path.as_ptr() as *const _);
+            }
         }
     }
 }
