@@ -1096,9 +1096,41 @@ impl PatchingCache {
     where
         F: FnMut(&mut PatchingCacheEntry) -> bool,
     {
+        const RETAIN_CONSOLIDATE_RATIO_THRESHOLD: f64 = 0.30;
+        const CONTENT_USAGE_THRESHOLD: f64 = 0.50;
+        let before_count = self.len();
+        let total_capacity = self.content().entry_table_size();
         let removed = self.content_mut().retain(f);
 
-        // ✅ retain 可能触发 consolidate（删除数量达到阈值时），需要检查并重建
+        // Consolidate when a sufficiently large fraction was removed to reclaim descriptor holes.
+        let removed_ratio = if before_count == 0 {
+            0.0
+        } else {
+            removed as f64 / before_count as f64
+        };
+        let content_usage = if total_capacity == 0 {
+            0.0
+        } else {
+            before_count as f64 / total_capacity as f64
+        };
+        if removed > 0
+            && (removed_ratio >= RETAIN_CONSOLIDATE_RATIO_THRESHOLD
+                || content_usage > CONTENT_USAGE_THRESHOLD)
+        {
+            log::info!(
+                "retain-triggered consolidate: removed={}, before_count={}, capacity={}, removed_ratio={:.4}, content_usage={:.4}",
+                removed,
+                before_count,
+                total_capacity,
+                removed_ratio,
+                content_usage
+            );
+            let consolidate_res = unsafe { self.content_mut().consolidate() };
+            if let Err(err) = consolidate_res {
+                log::error!("retain-triggered consolidate failed: {:?}", err);
+            }
+        }
+
         self.rebuild_if_invalidated();
 
         removed

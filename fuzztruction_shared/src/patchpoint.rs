@@ -426,11 +426,15 @@ impl PatchPoint {
             assert!(function.function_address > 0);
             let records = &map.stk_map_records[idx..(idx + function.record_count as usize)];
             records.iter().for_each(|record| {
-                if record.locations.is_empty() {
-                    log::warn!("StkMapRecord without recorded locations");
-                }
                 let locations = &record.locations;
-                assert_eq!(locations.len(), 2);
+                if locations.len() != 2 {
+                    log::warn!(
+                        "Skipping patchpoint {} due to unexpected stackmap location count: {} (expected 2)",
+                        record.patch_point_id,
+                        locations.len()
+                    );
+                    return;
+                }
 
                 let spill_slot_location = &locations[0];
                 if spill_slot_location.loc_type == LocationType::Indirect {

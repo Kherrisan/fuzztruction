@@ -160,18 +160,18 @@ impl TraceVector {
         self.entry(self.len() - 1)
     }
 
-    pub fn hit(&mut self, id: u32) {
-        self.hit_slice(id, &[]);
+    pub fn hit(&mut self, id: u32) -> bool {
+        self.hit_slice(id, &[])
     }
 
-    pub fn hit_value<T>(&mut self, id: u32, value: T) {
+    pub fn hit_value<T>(&mut self, id: u32, value: T) -> bool {
         let value_bytes = unsafe {
             std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
         };
-        self.hit_slice(id, value_bytes);
+        self.hit_slice(id, value_bytes)
     }
 
-    pub fn hit_slice(&mut self, id: u32, value: &[u8]) {
+    pub fn hit_slice(&mut self, id: u32, value: &[u8]) -> bool {
         let hit_len = value.len() as u32;
         let align = std::mem::align_of::<TraceVectorEntry>();
         let entry_size = size_of::<TraceVectorEntry>() + value.len();
@@ -187,8 +187,8 @@ impl TraceVector {
             let total_size = alignment_offset + entry_size;
             let new_offset = current_offset + total_size;
 
-            if new_offset > self.memory_capacity() {
-                panic!("TraceVector is full of capacity: {}", self.capacity());
+            if new_offset > self.memory_capacity() - 512 {
+                return false;
             }
 
             if self
@@ -230,12 +230,7 @@ impl TraceVector {
             std::ptr::copy_nonoverlapping(value.as_ptr(), value_ptr, value.len());
         }
 
-        // println!(
-        //     "Hit: id: {}, length: {}, offset: {}",
-        //     id,
-        //     value.len(),
-        //     self.header().offset
-        // );
+        true
     }
 
     fn entry(&self, idx: usize) -> Option<&TraceVectorEntry> {
