@@ -330,28 +330,11 @@ impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            log::trace!(
-                "TraceVectorIterator::next begin current_idx={} current_offset={} header_len={} header_offset={}",
-                self.current_idx,
-                self.current_offset,
-                self.trace_vector.len(),
-                self.trace_vector.offset()
-            );
             let written_bytes = self.trace_vector.offset();
             if self.current_idx >= self.trace_vector.len() {
-                log::trace!(
-                    "TraceVectorIterator::next stop current_idx>=header_len ({}>={})",
-                    self.current_idx,
-                    self.trace_vector.len()
-                );
                 return None;
             }
             if self.current_offset >= written_bytes {
-                log::trace!(
-                    "TraceVectorIterator::next stop current_offset>=written_bytes ({}>={})",
-                    self.current_offset,
-                    written_bytes
-                );
                 return None;
             }
 
@@ -368,12 +351,6 @@ impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
             // 应用对齐偏移
             self.current_offset += alignment_offset;
             if self.current_offset + size_of::<TraceVectorEntry>() > written_bytes {
-                log::trace!(
-                    "TraceVectorIterator::next stop header boundary before read: current_offset={} header_size={} written_bytes={}",
-                    self.current_offset,
-                    size_of::<TraceVectorEntry>(),
-                    written_bytes
-                );
                 return None;
             }
 
@@ -384,13 +361,6 @@ impl<'a, 'b> Iterator for TraceVectorIterator<'a, 'b> {
             };
             let next_offset = self.current_offset + size_of::<TraceVectorEntry>() + entry.length as usize;
             if next_offset > written_bytes {
-                log::trace!(
-                    "TraceVectorIterator::next stop next_offset>written_bytes next_offset={} written_bytes={} entry_id={} entry_len={}",
-                    next_offset,
-                    written_bytes,
-                    entry.id,
-                    entry.length
-                );
                 return None;
             }
 
