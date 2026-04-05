@@ -22,7 +22,8 @@ use crate::{
     constants::ENV_PC_SHM,
     patching_cache_content::{EntryIndexIter, EntryIndexIterMut, PatchingCacheContent},
     patching_cache_entry::{
-        PatchingCacheEntry, PatchingCacheEntryDirty, PatchingOperation, flags_to_str,
+        PatchingCacheEntry, PatchingCacheEntryDirty, PatchingOperation, PatchingOperator,
+        flags_to_str,
     },
     patchpoint::PatchPoint,
     tracing::Trace,
@@ -136,6 +137,7 @@ pub struct PatchingCache {
     content_size: usize,
     content: PatchingCacheContentRawPtr,
     dirty: bool,
+    consolidate_happened: bool,
     /// ✅ O(1) 查找：id -> entry_idx 映射
     id_to_idx: HashMap<PatchPointID, usize>,
 }
@@ -230,6 +232,7 @@ impl Clone for PatchingCache {
             content_size: size,
             content: PatchingCacheContentRawPtr(mutation_cache_content),
             dirty: self.dirty,
+            consolidate_happened: self.consolidate_happened,
             id_to_idx: HashMap::new(), // ✅ 初始化空的映射
         };
 
@@ -590,6 +593,7 @@ impl PatchingCache {
                 content_size: size,
                 content: PatchingCacheContentRawPtr(ptr),
                 dirty: false,
+                consolidate_happened: false,
                 id_to_idx: HashMap::new(), // ✅ 初始化空的映射
             };
 
@@ -656,6 +660,7 @@ impl PatchingCache {
             content_size: size,
             content: PatchingCacheContentRawPtr(mutation_cache_content),
             dirty: false,
+            consolidate_happened: false,
             id_to_idx: HashMap::new(), // ✅ 初始化空的映射
         });
     }
@@ -961,6 +966,13 @@ impl PatchingCache {
     /// 这在执行开始时调用，确保每个 entry 从第一个 operation 开始执行
     pub fn reset_entry_op(&mut self) {
         self.iter_mut().for_each(|entry| {
+            log::debug!(
+                "reset_entry_op: pp_id={} op_idx_before={:?} op_head_idx={:?} op_tail_idx={:?}",
+                entry.id().0,
+                entry.op_idx,
+                entry.op_head_idx,
+                entry.op_tail_idx
+            );
             entry.op_idx = entry.op_head_idx;
         });
     }
@@ -1005,10 +1017,28 @@ impl PatchingCache {
 
     pub fn reset_dirty(&mut self) {
         self.dirty = false;
+        self.consolidate_happened = false;
     }
 
     pub fn set_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    /// If a consolidate happened in the previous execution cleanup, convert all
+    /// Enable flags to Dirty right before the next sync so stubs are rebuilt once.
+    pub fn promote_enable_to_dirty_if_consolidated(&mut self) {
+        if !self.consolidate_happened {
+            return;
+        }
+
+        for idx in self.content().iter() {
+            self.content_mut()
+                .entry_mut(idx)
+                .set_by(PatchingCacheEntryDirty::Enable, PatchingCacheEntryDirty::Dirty);
+        }
+
+        self.dirty = true;
+        self.consolidate_happened = false;
     }
 
     // pub fn replace(&mut self, other: &PatchingCache) -> Result<()> {
@@ -1128,6 +1158,11 @@ impl PatchingCache {
             let consolidate_res = unsafe { self.content_mut().consolidate() };
             if let Err(err) = consolidate_res {
                 log::error!("retain-triggered consolidate failed: {:?}", err);
+            } else {
+                // Consolidate may relocate descriptors. We keep Clear->Enable reuse
+                // semantics, and defer Enable->Dirty promotion to the next sync.
+                self.dirty = true;
+                self.consolidate_happened = true;
             }
         }
 
@@ -1390,9 +1425,53 @@ impl PatchingCache {
 
             if let Some(&self_idx) = self_id_to_idx.get(&id) {
                 // 交集：同时存在于两个缓存中的条目
+                let self_ops_before = self.content().ops(self_idx);
+                let other_ops = other.content().ops(other_idx);
+                let self_flags_before = {
+                    let self_entry_ref = self.content().entry_ref(self_idx);
+                    *self_entry_ref.dirty_flags()
+                };
+                let self_has_jmp_before = self_ops_before
+                    .iter()
+                    .any(|op| op.op == PatchingOperator::Jmp);
+                let other_has_jmp = other_ops.iter().any(|op| op.op == PatchingOperator::Jmp);
+                if self_has_jmp_before || other_has_jmp {
+                    log::debug!(
+                        "union_single_pass(intersect): pp_id={} self_idx={} other_idx={} self_flags=[{}] other_flags=[{}] self_ops_before={:?} other_ops={:?}",
+                        id.0,
+                        self_idx,
+                        other_idx,
+                        flags_to_str(&self_flags_before),
+                        flags_to_str(other_entry.dirty_flags()),
+                        self_ops_before,
+                        other_ops
+                    );
+                }
                 let self_entry = self.content().entry_mut(self_idx);
                 let set_dirty =
                     Self::process_union_intersected_entry_all_flags(self_entry, other_entry);
+                let self_flags_after = *self_entry.dirty_flags();
+                if (matches!(
+                    self_flags_before[PatchingCacheEntryFlags::Patching as usize],
+                    PatchingCacheEntryDirty::Clear
+                ) && matches!(
+                    self_flags_after[PatchingCacheEntryFlags::Patching as usize],
+                    PatchingCacheEntryDirty::Enable
+                )) || (matches!(
+                    self_flags_before[PatchingCacheEntryFlags::Jumping as usize],
+                    PatchingCacheEntryDirty::Clear
+                ) && matches!(
+                    self_flags_after[PatchingCacheEntryFlags::Jumping as usize],
+                    PatchingCacheEntryDirty::Enable
+                )) {
+                    log::debug!(
+                        "union flag transition Clear->Enable: pp_id={} self_flags_before=[{}] other_flags=[{}] self_flags_after=[{}]",
+                        id.0,
+                        flags_to_str(&self_flags_before),
+                        flags_to_str(other_entry.dirty_flags()),
+                        flags_to_str(&self_flags_after)
+                    );
+                }
 
                 // 检查冲突：patching和jumping不能同时设置
                 if self_entry.is_dirty(PatchingCacheEntryFlags::Patching)
@@ -1535,6 +1614,21 @@ impl PatchingCache {
             PatchingCacheEntryFlags::Patching | PatchingCacheEntryFlags::Jumping => {
                 let other_ops = other.content().ops(other_idx);
                 let ops = self.content().ops(self_idx);
+                let self_entry = self.content().entry_ref(self_idx);
+                if ops.iter().any(|op| op.op == PatchingOperator::Jmp)
+                    || other_ops.iter().any(|op| op.op == PatchingOperator::Jmp)
+                {
+                    log::debug!(
+                        "handle_union_patching_operations(before): pp_id={} flag={:?} self_idx={} other_idx={} flags=[{}] self_ops={:?} other_ops={:?}",
+                        self_entry.id().0,
+                        flag,
+                        self_idx,
+                        other_idx,
+                        flags_to_str(self_entry.dirty_flags()),
+                        ops,
+                        other_ops
+                    );
+                }
 
                 if ops != other_ops {
                     // patching operations are executed dynamically,
@@ -1546,6 +1640,17 @@ impl PatchingCache {
                     self.content_mut()
                         .push_op_batch(self_idx, &other_ops)
                         .context("Failed to push op batch")?;
+                    let self_entry_after = self.content().entry_ref(self_idx);
+                    let ops_after = self.content().ops(self_idx);
+                    if ops_after.iter().any(|op| op.op == PatchingOperator::Jmp) {
+                        log::debug!(
+                            "handle_union_patching_operations(after): pp_id={} flag={:?} flags=[{}] ops_after={:?}",
+                            self_entry_after.id().0,
+                            flag,
+                            flags_to_str(self_entry_after.dirty_flags()),
+                            ops_after
+                        );
+                    }
                 }
             }
             _ => {}
